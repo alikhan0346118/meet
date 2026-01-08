@@ -27,17 +27,26 @@ def load_meetings():
                 df['start_datetime'] = pd.to_datetime(df['start_datetime'])
             if 'end_datetime' in df.columns:
                 df['end_datetime'] = pd.to_datetime(df['end_datetime'])
+            
+            # Ensure new columns exist (for backward compatibility)
+            required_columns = ['stakeholder', 'attendees_internal', 'attendees_external']
+            for col in required_columns:
+                if col not in df.columns:
+                    df[col] = ''
+            
             return df
         except Exception as e:
             st.error(f"Error loading meetings: {e}")
             return pd.DataFrame(columns=[
                 'meeting_id', 'title', 'start_datetime', 'end_datetime',
-                'meeting_type', 'organizer', 'location_or_link', 'notes', 'status'
+                'meeting_type', 'organizer', 'location_or_link', 'notes', 
+                'stakeholder', 'attendees_internal', 'attendees_external', 'status'
             ])
     else:
         return pd.DataFrame(columns=[
             'meeting_id', 'title', 'start_datetime', 'end_datetime',
-            'meeting_type', 'organizer', 'location_or_link', 'notes', 'status'
+            'meeting_type', 'organizer', 'location_or_link', 'notes',
+            'stakeholder', 'attendees_internal', 'attendees_external', 'status'
         ])
 
 def save_meetings(df):
@@ -113,11 +122,20 @@ def filter_meetings(df, status_filter, date_start, date_end, search_text):
     # Search filter
     if search_text:
         search_text_lower = search_text.lower()
-        mask = (
+        search_mask = (
             filtered_df['title'].astype(str).str.lower().str.contains(search_text_lower, na=False) |
             filtered_df['organizer'].astype(str).str.lower().str.contains(search_text_lower, na=False)
         )
-        filtered_df = filtered_df[mask]
+        
+        # Add optional fields to search if they exist
+        if 'stakeholder' in filtered_df.columns:
+            search_mask |= filtered_df['stakeholder'].astype(str).str.lower().str.contains(search_text_lower, na=False)
+        if 'attendees_internal' in filtered_df.columns:
+            search_mask |= filtered_df['attendees_internal'].astype(str).str.lower().str.contains(search_text_lower, na=False)
+        if 'attendees_external' in filtered_df.columns:
+            search_mask |= filtered_df['attendees_external'].astype(str).str.lower().str.contains(search_text_lower, na=False)
+        
+        filtered_df = filtered_df[search_mask]
     
     return filtered_df
 
@@ -125,7 +143,275 @@ def filter_meetings(df, status_filter, date_start, date_end, search_text):
 load_data()
 
 # Page configuration
-st.set_page_config(page_title="Meeting Dashboard", page_icon="📅", layout="wide")
+st.set_page_config(
+    page_title="Meeting Dashboard", 
+    page_icon="📅", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    /* Main container styling */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    
+    /* Header styling */
+    h1 {
+        color: #0066CC;
+        border-bottom: 3px solid #0066CC;
+        padding-bottom: 0.5rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    h2 {
+        color: #004499;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+    }
+    
+    h3 {
+        color: #0055AA;
+        margin-top: 1.5rem;
+        margin-bottom: 0.75rem;
+    }
+    
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background-color: #F0F4F8;
+    }
+    
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1 {
+        color: #0066CC;
+        border-bottom: 2px solid #0066CC;
+    }
+    
+    /* Button styling */
+    .stButton>button {
+        background-color: #0066CC;
+        color: white;
+        border-radius: 8px;
+        border: none;
+        padding: 0.5rem 1.5rem;
+        font-weight: 500;
+        transition: all 0.3s;
+    }
+    
+    .stButton>button:hover {
+        background-color: #0055AA;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0, 102, 204, 0.3);
+    }
+    
+    /* Secondary button */
+    button[kind="secondary"] {
+        background-color: #6C757D;
+        color: white;
+    }
+    
+    button[kind="secondary"]:hover {
+        background-color: #5A6268;
+    }
+    
+    /* Success messages */
+    .stSuccess {
+        background-color: #D4EDDA;
+        border-left: 4px solid #28A745;
+        color: #155724;
+        padding: 1rem;
+        border-radius: 4px;
+    }
+    
+    /* Error messages */
+    .stError {
+        background-color: #F8D7DA;
+        border-left: 4px solid #DC3545;
+        color: #721C24;
+        padding: 1rem;
+        border-radius: 4px;
+    }
+    
+    /* Info messages */
+    .stInfo {
+        background-color: #D1ECF1;
+        border-left: 4px solid #17A2B8;
+        color: #0C5460;
+        padding: 1rem;
+        border-radius: 4px;
+    }
+    
+    /* Warning messages */
+    .stWarning {
+        background-color: #FFF3CD;
+        border-left: 4px solid #FFC107;
+        color: #856404;
+        padding: 1rem;
+        border-radius: 4px;
+    }
+    
+    /* Metric cards */
+    [data-testid="stMetricValue"] {
+        color: #0066CC;
+        font-size: 2rem;
+        font-weight: bold;
+    }
+    
+    [data-testid="stMetricLabel"] {
+        color: #6C757D;
+        font-weight: 600;
+    }
+    
+    /* Dataframe styling */
+    .dataframe {
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Input fields */
+    .stTextInput>div>div>input,
+    .stTextArea>div>div>textarea,
+    .stSelectbox>div>div>select {
+        border-radius: 6px;
+        border: 1px solid #DEE2E6;
+    }
+    
+    .stTextInput>div>div>input:focus,
+    .stTextArea>div>div>textarea:focus,
+    .stSelectbox>div>div>select:focus {
+        border-color: #0066CC;
+        box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background-color: #E9ECEF;
+        border-radius: 6px;
+        padding: 0.75rem;
+        font-weight: 600;
+        color: #004499;
+    }
+    
+    /* Divider/HR styling */
+    hr {
+        border: none;
+        height: 2px;
+        background: linear-gradient(to right, #0066CC, transparent);
+        margin: 2rem 0;
+    }
+    
+    /* Sidebar radio buttons */
+    [data-testid="stSidebar"] [data-testid="stRadio"] label {
+        padding: 0.5rem;
+        border-radius: 6px;
+        margin: 0.25rem 0;
+        transition: all 0.2s;
+    }
+    
+    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+        background-color: #E9ECEF;
+    }
+    
+    /* File uploader */
+    [data-testid="stFileUploader"] {
+        border: 2px dashed #0066CC;
+        border-radius: 8px;
+        padding: 2rem;
+        background-color: #F8F9FA;
+    }
+    
+    /* Tabs if used */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 6px 6px 0 0;
+        padding: 0.5rem 1.5rem;
+    }
+    
+    /* Date and time inputs */
+    [data-testid="stDateInput"] {
+        border-radius: 6px;
+    }
+    
+    [data-testid="stTimeInput"] {
+        border-radius: 6px;
+    }
+    
+    /* Checkbox styling */
+    [data-testid="stCheckbox"] label {
+        font-weight: 500;
+        color: #1A1A1A;
+    }
+    
+    /* Caption styling */
+    .stCaption {
+        color: #6C757D;
+        font-style: italic;
+    }
+    
+    /* Status badges styling */
+    .status-badge {
+        padding: 0.25rem 0.75rem;
+        border-radius: 12px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        display: inline-block;
+    }
+    
+    .status-upcoming {
+        background-color: #C8E6C9;
+        color: #2E7D32;
+    }
+    
+    .status-ongoing {
+        background-color: #BBDEFB;
+        color: #1565C0;
+    }
+    
+    .status-ended {
+        background-color: #E0E0E0;
+        color: #424242;
+    }
+    
+    .status-completed {
+        background-color: #C5E1A5;
+        color: #33691E;
+    }
+    
+    /* Card-like containers */
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 12px;
+        color: white;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Smooth transitions */
+    * {
+        transition: background-color 0.2s ease, color 0.2s ease;
+    }
+    
+    /* Form sections */
+    .form-section {
+        background-color: #FFFFFF;
+        padding: 1.5rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        margin-bottom: 1.5rem;
+    }
+    
+    /* Table row hover effect */
+    .dataframe tbody tr:hover {
+        background-color: #F0F4F8 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Sidebar Navigation
 st.sidebar.title("📅 Meeting Dashboard")
@@ -214,6 +500,32 @@ if st.session_state.current_page == "Add New Meeting":
             )
             location_or_link = st.text_input("Location or Link", value="")
         
+        # New fields section
+        st.markdown("**Attendees & Stakeholders**")
+        col_attendees1, col_attendees2 = st.columns(2)
+        
+        with col_attendees1:
+            stakeholder = st.text_input(
+                "Stakeholder",
+                value="",
+                placeholder="Enter stakeholder name(s)",
+                help="Enter the name(s) of key stakeholders for this meeting"
+            )
+            attendees_internal = st.text_input(
+                "Attendees Internal",
+                value="",
+                placeholder="Enter internal team member names (comma-separated)",
+                help="Enter names of internal team members attending (separate multiple names with commas)"
+            )
+        
+        with col_attendees2:
+            attendees_external = st.text_input(
+                "External Guests",
+                value="",
+                placeholder="Enter external guest names (comma-separated)",
+                help="Enter names of external guests or clients attending (separate multiple names with commas)"
+            )
+        
         notes = st.text_area(
             "Agenda or Notes", 
             value="", 
@@ -253,7 +565,10 @@ if st.session_state.current_page == "Add New Meeting":
                     'meeting_type': meeting_type,
                     'organizer': organizer.strip(),
                     'location_or_link': location_or_link.strip(),
-                    'notes': notes.strip()
+                    'notes': notes.strip(),
+                    'stakeholder': stakeholder.strip(),
+                    'attendees_internal': attendees_internal.strip(),
+                    'attendees_external': attendees_external.strip()
                 }])
                 
                 new_meeting['status'] = new_meeting.apply(calculate_status, axis=1)
@@ -300,11 +615,17 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                 st.write(f"**Status:** {selected_meeting.get('status', 'N/A')}")
                 st.write(f"**Type:** {selected_meeting['meeting_type']}")
                 st.write(f"**Organizer:** {selected_meeting['organizer']}")
+                if selected_meeting.get('stakeholder'):
+                    st.write(f"**Stakeholder:** {selected_meeting.get('stakeholder', 'N/A')}")
             with col2:
                 st.write(f"**Start:** {pd.to_datetime(selected_meeting['start_datetime']).strftime(DATE_FORMAT)}")
                 st.write(f"**End:** {pd.to_datetime(selected_meeting['end_datetime']).strftime(DATE_FORMAT)}")
                 if selected_meeting.get('location_or_link'):
                     st.write(f"**Location/Link:** {selected_meeting['location_or_link']}")
+                if selected_meeting.get('attendees_internal'):
+                    st.write(f"**Internal Attendees:** {selected_meeting.get('attendees_internal', 'N/A')}")
+                if selected_meeting.get('attendees_external'):
+                    st.write(f"**External Guests:** {selected_meeting.get('attendees_external', 'N/A')}")
         
         # Edit form
         st.markdown("---")
@@ -336,6 +657,32 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                 )
                 edit_location_or_link = st.text_input("Location or Link", 
                                                     value=selected_meeting.get('location_or_link', ''))
+            
+            # Attendees & Stakeholders section
+            st.markdown("**Attendees & Stakeholders**")
+            col_attendees1, col_attendees2 = st.columns(2)
+            
+            with col_attendees1:
+                edit_stakeholder = st.text_input(
+                    "Stakeholder",
+                    value=selected_meeting.get('stakeholder', ''),
+                    placeholder="Enter stakeholder name(s)",
+                    help="Enter the name(s) of key stakeholders for this meeting"
+                )
+                edit_attendees_internal = st.text_input(
+                    "Attendees Internal",
+                    value=selected_meeting.get('attendees_internal', ''),
+                    placeholder="Enter internal team member names (comma-separated)",
+                    help="Enter names of internal team members attending (separate multiple names with commas)"
+                )
+            
+            with col_attendees2:
+                edit_attendees_external = st.text_input(
+                    "External Guests",
+                    value=selected_meeting.get('attendees_external', ''),
+                    placeholder="Enter external guest names (comma-separated)",
+                    help="Enter names of external guests or clients attending (separate multiple names with commas)"
+                )
             
             # Status selection section
             st.markdown("**Status**")
@@ -411,6 +758,9 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                     st.session_state.meetings_df.at[idx, 'organizer'] = edit_organizer.strip()
                     st.session_state.meetings_df.at[idx, 'location_or_link'] = edit_location_or_link.strip()
                     st.session_state.meetings_df.at[idx, 'notes'] = edit_notes.strip()
+                    st.session_state.meetings_df.at[idx, 'stakeholder'] = edit_stakeholder.strip()
+                    st.session_state.meetings_df.at[idx, 'attendees_internal'] = edit_attendees_internal.strip()
+                    st.session_state.meetings_df.at[idx, 'attendees_external'] = edit_attendees_external.strip()
                     
                     # Set status - use manual selection or auto-calculate based on checkbox
                     if use_auto_status:
@@ -488,7 +838,8 @@ elif st.session_state.current_page == "Meetings Summary & Export":
         date_end = st.date_input("End Date", value=None)
     
     with col4:
-        search_text = st.text_input("Search (Title/Organizer)", value="")
+        search_text = st.text_input("Search (Title/Organizer/Attendees)", value="", 
+                                  help="Search by title, organizer, stakeholder, or attendee names")
     
     # Apply filters
     if not st.session_state.meetings_df.empty:
@@ -537,7 +888,8 @@ elif st.session_state.current_page == "Meetings Summary & Export":
         
         # Select columns to display
         display_columns = ['title', 'start_datetime', 'end_datetime', 'status', 
-                          'meeting_type', 'organizer', 'location_or_link', 'notes']
+                          'meeting_type', 'organizer', 'stakeholder', 'attendees_internal', 
+                          'attendees_external', 'location_or_link', 'notes']
         available_columns = [col for col in display_columns if col in display_df.columns]
         
         st.dataframe(
@@ -550,6 +902,238 @@ elif st.session_state.current_page == "Meetings Summary & Export":
         st.caption(f"Showing {len(display_df)} meeting(s)")
     else:
         st.info("📭 No meetings found matching your filters.")
+    
+    # Import/Upload section
+    st.markdown("---")
+    st.subheader("📤 Import/Update from Excel")
+    
+    # Template download option
+    col_template1, col_template2 = st.columns([3, 1])
+    with col_template1:
+        st.write("Upload an Excel file to import or update meeting records.")
+    with col_template2:
+        # Create template dataframe
+        template_df = pd.DataFrame(columns=[
+            'meeting_id', 'title', 'start_datetime', 'end_datetime',
+            'meeting_type', 'organizer', 'location_or_link', 'notes',
+            'stakeholder', 'attendees_internal', 'attendees_external', 'status'
+        ])
+        # Add sample row
+        template_df = pd.concat([template_df, pd.DataFrame([{
+            'meeting_id': 1,
+            'title': 'Sample Meeting',
+            'start_datetime': datetime.now(),
+            'end_datetime': datetime.now() + timedelta(hours=1),
+            'meeting_type': 'Virtual',
+            'organizer': 'John Doe',
+            'location_or_link': 'https://meet.example.com',
+            'notes': 'Sample agenda items',
+            'stakeholder': 'Jane Smith',
+            'attendees_internal': 'Team Member 1, Team Member 2',
+            'attendees_external': 'Client A, Client B',
+            'status': 'Upcoming'
+        }])], ignore_index=True)
+        
+        # Save template to bytes
+        import io
+        template_buffer = io.BytesIO()
+        template_df.to_excel(template_buffer, index=False)
+        template_buffer.seek(0)
+        
+        st.download_button(
+            label="📥 Download Template",
+            data=template_buffer,
+            file_name="meeting_import_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Download a template Excel file with the correct column format"
+        )
+    
+    uploaded_file = st.file_uploader(
+        "Choose an Excel file to import",
+        type=['xlsx', 'xls'],
+        help="Upload an Excel file with meeting data. Required columns: title, start_datetime, end_datetime, meeting_type, organizer. Optional: meeting_id, location_or_link, notes, stakeholder, attendees_internal, attendees_external, status"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            # Read the uploaded file
+            import_df = pd.read_excel(uploaded_file)
+            
+            # Check required columns
+            required_columns = ['title', 'start_datetime', 'end_datetime', 'meeting_type', 'organizer']
+            missing_columns = [col for col in required_columns if col not in import_df.columns]
+            
+            if missing_columns:
+                st.error(f"❌ Missing required columns: {', '.join(missing_columns)}")
+                st.info("Required columns: title, start_datetime, end_datetime, meeting_type, organizer")
+            else:
+                # Ensure datetime columns are properly formatted
+                if 'start_datetime' in import_df.columns:
+                    import_df['start_datetime'] = pd.to_datetime(import_df['start_datetime'], errors='coerce')
+                if 'end_datetime' in import_df.columns:
+                    import_df['end_datetime'] = pd.to_datetime(import_df['end_datetime'], errors='coerce')
+                
+                # Show preview
+                st.markdown("**📋 Preview of Uploaded Data:**")
+                st.dataframe(import_df.head(10), use_container_width=True, hide_index=True)
+                st.caption(f"Total rows to import: {len(import_df)}")
+                
+                # Import options
+                col1, col2 = st.columns(2)
+                with col1:
+                    import_mode = st.radio(
+                        "Import Mode:",
+                        ["Add New Only", "Update Existing", "Update & Add New"],
+                        help="Add New: Only import records with new meeting_id\nUpdate Existing: Only update records with matching meeting_id\nUpdate & Add New: Do both"
+                    )
+                
+                with col2:
+                    overwrite_status = st.checkbox(
+                        "Overwrite existing status",
+                        value=False,
+                        help="If checked, will overwrite status of existing meetings. If unchecked, will preserve current status for existing meetings."
+                    )
+                
+                # Validate data before import
+                validation_errors = []
+                for idx, row in import_df.iterrows():
+                    if pd.isna(row.get('title')) or str(row.get('title', '')).strip() == '':
+                        validation_errors.append(f"Row {idx + 1}: Title is required")
+                    if pd.isna(row.get('organizer')) or str(row.get('organizer', '')).strip() == '':
+                        validation_errors.append(f"Row {idx + 1}: Organizer is required")
+                    if pd.isna(row.get('start_datetime')):
+                        validation_errors.append(f"Row {idx + 1}: Start datetime is required and must be valid")
+                    if pd.isna(row.get('end_datetime')):
+                        validation_errors.append(f"Row {idx + 1}: End datetime is required and must be valid")
+                    if not pd.isna(row.get('start_datetime')) and not pd.isna(row.get('end_datetime')):
+                        if row['start_datetime'] >= row['end_datetime']:
+                            validation_errors.append(f"Row {idx + 1}: End datetime must be after start datetime")
+                
+                if validation_errors:
+                    st.warning("⚠️ **Validation Errors Found:**")
+                    for error in validation_errors[:10]:  # Show first 10 errors
+                        st.write(f"- {error}")
+                    if len(validation_errors) > 10:
+                        st.write(f"- ... and {len(validation_errors) - 10} more errors")
+                else:
+                    # Proceed with import
+                    if st.button("✅ Import Data", type="primary", use_container_width=True):
+                        try:
+                            # Ensure required columns exist in import_df
+                            for col in ['stakeholder', 'attendees_internal', 'attendees_external', 'location_or_link', 'notes']:
+                                if col not in import_df.columns:
+                                    import_df[col] = ''
+                            if 'status' not in import_df.columns:
+                                # Calculate status for new records
+                                import_df['status'] = import_df.apply(calculate_status, axis=1)
+                            
+                            # Get current dataframe
+                            current_df = st.session_state.meetings_df.copy()
+                            
+                            if current_df.empty:
+                                # If no existing data, just add all
+                                if 'meeting_id' not in import_df.columns:
+                                    # Generate meeting IDs
+                                    import_df['meeting_id'] = range(1, len(import_df) + 1)
+                                st.session_state.meetings_df = import_df.copy()
+                                added_count = len(import_df)
+                                updated_count = 0
+                            else:
+                                # Handle meeting_id
+                                if 'meeting_id' not in import_df.columns:
+                                    # Generate new IDs for records without IDs
+                                    max_id = current_df['meeting_id'].max() if 'meeting_id' in current_df.columns else 0
+                                    import_df['meeting_id'] = range(int(max_id) + 1, int(max_id) + 1 + len(import_df))
+                                
+                                # Convert meeting_id to int for comparison
+                                import_df['meeting_id'] = import_df['meeting_id'].astype(int)
+                                current_df['meeting_id'] = current_df['meeting_id'].astype(int)
+                                
+                                added_count = 0
+                                updated_count = 0
+                                
+                                if import_mode == "Add New Only":
+                                    # Only add records with new meeting_ids
+                                    existing_ids = set(current_df['meeting_id'].values)
+                                    new_records = import_df[~import_df['meeting_id'].isin(existing_ids)].copy()
+                                    if not new_records.empty:
+                                        # Recalculate status for new records
+                                        new_records['status'] = new_records.apply(calculate_status, axis=1)
+                                        st.session_state.meetings_df = pd.concat([current_df, new_records], ignore_index=True)
+                                        added_count = len(new_records)
+                                
+                                elif import_mode == "Update Existing":
+                                    # Only update existing records
+                                    existing_ids = set(current_df['meeting_id'].values)
+                                    to_update = import_df[import_df['meeting_id'].isin(existing_ids)].copy()
+                                    if not to_update.empty:
+                                        for _, row in to_update.iterrows():
+                                            idx = current_df[current_df['meeting_id'] == row['meeting_id']].index[0]
+                                            # Update all fields
+                                            for col in current_df.columns:
+                                                if col in row and col != 'status':
+                                                    current_df.at[idx, col] = row[col]
+                                                elif col == 'status':
+                                                    if overwrite_status:
+                                                        current_df.at[idx, col] = row.get('status', calculate_status(row))
+                                                    # Otherwise keep existing status
+                                            # Recalculate status if overwrite is enabled or status is missing
+                                            if overwrite_status or pd.isna(row.get('status')):
+                                                current_df.at[idx, 'status'] = calculate_status(current_df.iloc[idx])
+                                        st.session_state.meetings_df = current_df
+                                        updated_count = len(to_update)
+                                    else:
+                                        st.warning("No records with matching meeting_id found to update.")
+                                        st.session_state.meetings_df = current_df
+                                
+                                else:  # Update & Add New
+                                    existing_ids = set(current_df['meeting_id'].values)
+                                    to_update = import_df[import_df['meeting_id'].isin(existing_ids)].copy()
+                                    to_add = import_df[~import_df['meeting_id'].isin(existing_ids)].copy()
+                                    
+                                    # Update existing
+                                    if not to_update.empty:
+                                        for _, row in to_update.iterrows():
+                                            idx = current_df[current_df['meeting_id'] == row['meeting_id']].index[0]
+                                            for col in current_df.columns:
+                                                if col in row and col != 'status':
+                                                    current_df.at[idx, col] = row[col]
+                                                elif col == 'status':
+                                                    if overwrite_status:
+                                                        current_df.at[idx, col] = row.get('status', calculate_status(row))
+                                            if overwrite_status or pd.isna(row.get('status')):
+                                                current_df.at[idx, 'status'] = calculate_status(current_df.iloc[idx])
+                                        updated_count = len(to_update)
+                                    
+                                    # Add new
+                                    if not to_add.empty:
+                                        to_add['status'] = to_add.apply(calculate_status, axis=1)
+                                        current_df = pd.concat([current_df, to_add], ignore_index=True)
+                                        added_count = len(to_add)
+                                    
+                                    st.session_state.meetings_df = current_df
+                            
+                            # Save to Excel
+                            if save_meetings(st.session_state.meetings_df):
+                                success_msg = "✅ Import completed successfully!"
+                                if added_count > 0:
+                                    success_msg += f" Added {added_count} new meeting(s)."
+                                if updated_count > 0:
+                                    success_msg += f" Updated {updated_count} existing meeting(s)."
+                                st.success(success_msg)
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("Failed to save imported data.")
+                        
+                        except Exception as e:
+                            st.error(f"Error during import: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+        
+        except Exception as e:
+            st.error(f"Error reading file: {str(e)}")
+            st.info("Please ensure the file is a valid Excel file (.xlsx or .xls format)")
     
     # Export section
     st.markdown("---")
