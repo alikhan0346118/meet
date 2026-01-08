@@ -546,10 +546,10 @@ if st.session_state.current_page == "Add New Meeting":
                 help="Enter the client name"
             )
             stakeholder_name = st.text_input(
-                "Stakeholder Name",
+                "Stakeholder Name *",
                 value="",
                 placeholder="Enter stakeholder name(s)",
-                help="Enter the name(s) of key stakeholders"
+                help="Enter the name(s) of key stakeholders (Required)"
             )
         
         with col2:
@@ -599,17 +599,17 @@ if st.session_state.current_page == "Add New Meeting":
         
         with col_att1:
             attendees = st.text_input(
-                "Attendees",
+                "Attendees *",
                 value="",
                 placeholder="Enter attendee names (comma-separated)",
-                help="Enter names of all attendees (separate multiple names with commas)"
+                help="Enter names of all attendees (separate multiple names with commas) (Required)"
             )
         with col_att2:
             internal_external_guests = st.text_input(
-                "Internal External Guests",
+                "Internal External Guests *",
                 value="",
                 placeholder="Enter internal/external guest names",
-                help="Enter names of internal and external guests"
+                help="Enter names of internal and external guests (Required)"
             )
         
         # Agenda and Notes
@@ -659,6 +659,15 @@ if st.session_state.current_page == "Add New Meeting":
             errors = []
             if not meeting_title.strip():
                 errors.append("Meeting Title is required")
+            
+            if not stakeholder_name.strip():
+                errors.append("Stakeholder Name is required")
+            
+            if not attendees.strip():
+                errors.append("Attendees is required")
+            
+            if not internal_external_guests.strip():
+                errors.append("Internal External Guests is required")
             
             if errors:
                 for error in errors:
@@ -798,9 +807,10 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                     placeholder="Enter client name"
                 )
                 edit_stakeholder_name = st.text_input(
-                    "Stakeholder Name",
+                    "Stakeholder Name *",
                     value=str(selected_meeting.get('Stakeholder Name', '')),
-                    placeholder="Enter stakeholder name(s)"
+                    placeholder="Enter stakeholder name(s)",
+                    help="Enter the name(s) of key stakeholders (Required)"
                 )
             
             with col2:
@@ -861,10 +871,12 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
             col_att1, col_att2 = st.columns(2)
             
             with col_att1:
-                edit_attendees = st.text_input("Attendees", value=str(selected_meeting.get('Attendees', '')))
+                edit_attendees = st.text_input("Attendees *", value=str(selected_meeting.get('Attendees', '')),
+                                              help="Enter names of all attendees (Required)")
             with col_att2:
-                edit_internal_external_guests = st.text_input("Internal External Guests", 
-                                                             value=str(selected_meeting.get('Internal External Guests', '')))
+                edit_internal_external_guests = st.text_input("Internal External Guests *", 
+                                                             value=str(selected_meeting.get('Internal External Guests', '')),
+                                                             help="Enter names of internal and external guests (Required)")
             
             # Agenda and Notes
             st.markdown("**Agenda & Notes**")
@@ -907,6 +919,15 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                 errors = []
                 if not edit_meeting_title.strip():
                     errors.append("Meeting Title is required")
+                
+                if not edit_stakeholder_name.strip():
+                    errors.append("Stakeholder Name is required")
+                
+                if not edit_attendees.strip():
+                    errors.append("Attendees is required")
+                
+                if not edit_internal_external_guests.strip():
+                    errors.append("Internal External Guests is required")
                 
                 if errors:
                     for error in errors:
@@ -1154,12 +1175,12 @@ elif st.session_state.current_page == "Meetings Summary & Export":
             import_df = pd.read_excel(uploaded_file)
             
             # Check required columns
-            required_columns = ['Meeting Title', 'Meeting Date', 'Start Time']
+            required_columns = ['Meeting Title', 'Meeting Date', 'Start Time', 'Stakeholder Name', 'Attendees', 'Internal External Guests']
             missing_columns = [col for col in required_columns if col not in import_df.columns]
             
             if missing_columns:
                 st.error(f"❌ Missing required columns: {', '.join(missing_columns)}")
-                st.info("Required columns: Meeting Title, Meeting Date, Start Time")
+                st.info("Required columns: Meeting Title, Meeting Date, Start Time, Stakeholder Name, Attendees, Internal External Guests")
             else:
                 # Ensure datetime columns are properly formatted
                 if 'Meeting Date' in import_df.columns:
@@ -1250,8 +1271,30 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                             import_df.at[idx, 'Start Time'] = ''
                     # If row has no Meeting Title, skip processing (treat as empty row)
                 
-                # No validation errors - Start Time and Meeting Date are optional
+                # Validate required fields
                 validation_errors = []
+                for idx, row in import_df.iterrows():
+                    # Only validate rows that have a Meeting Title
+                    meeting_title = row.get('Meeting Title', '')
+                    has_meeting_title = (
+                        pd.notna(meeting_title) and 
+                        str(meeting_title).strip() != '' and 
+                        str(meeting_title).strip().lower() not in ['nan', 'none', 'null', '']
+                    )
+                    
+                    if has_meeting_title:
+                        # Validate required fields
+                        stakeholder_name = row.get('Stakeholder Name', '')
+                        if pd.isna(stakeholder_name) or str(stakeholder_name).strip() == '':
+                            validation_errors.append(f"Row {idx + 1}: Stakeholder Name is required")
+                        
+                        attendees = row.get('Attendees', '')
+                        if pd.isna(attendees) or str(attendees).strip() == '':
+                            validation_errors.append(f"Row {idx + 1}: Attendees is required")
+                        
+                        internal_external_guests = row.get('Internal External Guests', '')
+                        if pd.isna(internal_external_guests) or str(internal_external_guests).strip() == '':
+                            validation_errors.append(f"Row {idx + 1}: Internal External Guests is required")
                 
                 if validation_errors:
                     st.warning("⚠️ **Validation Errors Found:**")
