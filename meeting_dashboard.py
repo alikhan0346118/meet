@@ -1239,25 +1239,8 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                 pass  # Delete button is outside form
             
             if update_submitted:
-                # Validation
-                errors = []
-                if not edit_meeting_title.strip():
-                    errors.append("Meeting Title is required")
-                
-                if not edit_stakeholder_name.strip():
-                    errors.append("Stakeholder Name is required")
-                
-                if not edit_attendees.strip():
-                    errors.append("Attendees is required")
-                
-                if not edit_internal_external_guests.strip():
-                    errors.append("Internal External Guests is required")
-                
-                if errors:
-                    for error in errors:
-                        st.error(error)
-                else:
-                    # Find the index - use stored index if available, otherwise lookup
+                # Auto-fill missing required fields with empty strings (null) instead of showing errors
+                # Find the index - use stored index if available, otherwise lookup
                     idx = None
                     
                     # First, try to use the stored index from session state
@@ -1295,29 +1278,29 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                         st.error("❌ Could not find the meeting to update. The meeting may have been deleted. Please refresh the page.")
                         st.stop()
                     
-                    # Update meeting
-                    st.session_state.meetings_df.at[idx, 'Meeting Title'] = edit_meeting_title.strip()
-                    st.session_state.meetings_df.at[idx, 'Organization'] = edit_organization.strip()
-                    st.session_state.meetings_df.at[idx, 'Client'] = edit_client.strip()
-                    st.session_state.meetings_df.at[idx, 'Stakeholder Name'] = edit_stakeholder_name.strip()
-                    st.session_state.meetings_df.at[idx, 'Purpose'] = edit_purpose.strip()
-                    st.session_state.meetings_df.at[idx, 'Agenda'] = edit_agenda.strip()
-                    st.session_state.meetings_df.at[idx, 'Meeting Date'] = edit_meeting_date
+                    # Update meeting - automatically set missing required fields to empty string (null)
+                    st.session_state.meetings_df.at[idx, 'Meeting Title'] = edit_meeting_title.strip() if edit_meeting_title.strip() else ''
+                    st.session_state.meetings_df.at[idx, 'Organization'] = edit_organization.strip() if edit_organization else ''
+                    st.session_state.meetings_df.at[idx, 'Client'] = edit_client.strip() if edit_client else ''
+                    st.session_state.meetings_df.at[idx, 'Stakeholder Name'] = edit_stakeholder_name.strip() if edit_stakeholder_name.strip() else ''
+                    st.session_state.meetings_df.at[idx, 'Purpose'] = edit_purpose.strip() if edit_purpose else ''
+                    st.session_state.meetings_df.at[idx, 'Agenda'] = edit_agenda.strip() if edit_agenda else ''
+                    st.session_state.meetings_df.at[idx, 'Meeting Date'] = edit_meeting_date if edit_meeting_date else ''
                     st.session_state.meetings_df.at[idx, 'Start Time'] = edit_start_time.strftime('%H:%M:%S') if edit_start_time else ''
-                    st.session_state.meetings_df.at[idx, 'Time Zone'] = edit_time_zone.strip()
-                    st.session_state.meetings_df.at[idx, 'Meeting Type'] = edit_meeting_type
-                    st.session_state.meetings_df.at[idx, 'Meeting Link'] = edit_meeting_link.strip()
-                    st.session_state.meetings_df.at[idx, 'Location'] = edit_location.strip()
-                    st.session_state.meetings_df.at[idx, 'Status'] = edit_status
-                    st.session_state.meetings_df.at[idx, 'Priority'] = edit_priority
-                    st.session_state.meetings_df.at[idx, 'Attendees'] = edit_attendees.strip()
-                    st.session_state.meetings_df.at[idx, 'Internal External Guests'] = edit_internal_external_guests.strip()
-                    st.session_state.meetings_df.at[idx, 'Notes'] = edit_notes.strip()
-                    st.session_state.meetings_df.at[idx, 'Next Action'] = edit_next_action.strip()
+                    st.session_state.meetings_df.at[idx, 'Time Zone'] = edit_time_zone.strip() if edit_time_zone else ''
+                    st.session_state.meetings_df.at[idx, 'Meeting Type'] = edit_meeting_type if edit_meeting_type else ''
+                    st.session_state.meetings_df.at[idx, 'Meeting Link'] = edit_meeting_link.strip() if edit_meeting_link else ''
+                    st.session_state.meetings_df.at[idx, 'Location'] = edit_location.strip() if edit_location else ''
+                    st.session_state.meetings_df.at[idx, 'Status'] = edit_status if edit_status else ''
+                    st.session_state.meetings_df.at[idx, 'Priority'] = edit_priority if edit_priority else ''
+                    st.session_state.meetings_df.at[idx, 'Attendees'] = edit_attendees.strip() if edit_attendees.strip() else ''
+                    st.session_state.meetings_df.at[idx, 'Internal External Guests'] = edit_internal_external_guests.strip() if edit_internal_external_guests.strip() else ''
+                    st.session_state.meetings_df.at[idx, 'Notes'] = edit_notes.strip() if edit_notes else ''
+                    st.session_state.meetings_df.at[idx, 'Next Action'] = edit_next_action.strip() if edit_next_action else ''
                     st.session_state.meetings_df.at[idx, 'Follow up Date'] = edit_follow_up_date if edit_follow_up_date else ''
-                    st.session_state.meetings_df.at[idx, 'Reminder Sent'] = edit_reminder_sent
-                    st.session_state.meetings_df.at[idx, 'Calendar Sync'] = edit_calendar_sync
-                    st.session_state.meetings_df.at[idx, 'Calendar Event Title'] = edit_calendar_event_title.strip()
+                    st.session_state.meetings_df.at[idx, 'Reminder Sent'] = edit_reminder_sent if edit_reminder_sent else ''
+                    st.session_state.meetings_df.at[idx, 'Calendar Sync'] = edit_calendar_sync if edit_calendar_sync else ''
+                    st.session_state.meetings_df.at[idx, 'Calendar Event Title'] = edit_calendar_event_title.strip() if edit_calendar_event_title else ''
                     
                     # Save to Excel
                     if save_meetings(st.session_state.meetings_df):
