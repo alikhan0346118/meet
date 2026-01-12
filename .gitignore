@@ -26,6 +26,8 @@ wheels/
 # Streamlit
 .streamlit/*
 !.streamlit/config.toml
+!.streamlit/secrets.toml.example
+.streamlit/secrets.toml
 
 # Excel files (data files)
 *.xlsx

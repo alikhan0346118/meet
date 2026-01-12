@@ -12,11 +12,20 @@ A simple and efficient Streamlit application for managing and tracking team meet
 - 🔄 **Auto Status Updates** - Automatic status calculation (Upcoming, Ongoing, Ended, Completed)
 - 🎯 **Real-time Updates** - Auto-refresh option for live status updates
 
-## Pages
+## Applications
 
+### Meeting Dashboard (`meeting_dashboard.py`)
 1. **Add New Meeting** - Create new meetings with form validation
 2. **Edit or Delete Meeting** - Modify existing meetings or remove them
 3. **Meetings Summary & Export** - View filtered meetings and export data
+
+### Podcast Dashboard (`podcast_dashboard.py`) - NEW
+A separate dashboard for managing podcast meetings with:
+1. **Add New Podcast Meeting** - Create podcast meeting records with guest information
+2. **Edit/Update Podcast Meeting** - Modify existing podcast meetings
+3. **Podcast Meetings Summary & Export** - View, filter, and export podcast meeting data
+
+**Note:** The podcast dashboard uses a separate database table (`podcast_meetings`) and does not interfere with regular meeting data.
 
 ## Installation
 
@@ -33,7 +42,11 @@ pip install -r requirements.txt
 
 3. Run the application:
 ```bash
+# For regular meetings:
 streamlit run meeting_dashboard.py
+
+# For podcast meetings (NEW):
+streamlit run podcast_dashboard.py
 ```
 
 ## Usage

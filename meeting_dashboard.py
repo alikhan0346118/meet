@@ -4,10 +4,44 @@ from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import time
+import psycopg2
+from psycopg2.extras import execute_values, RealDictCursor
+from psycopg2.pool import SimpleConnectionPool
+from contextlib import contextmanager
 
 # Configuration
 EXCEL_FILE = "Meeting_Schedule_Template.xlsx"
 DATE_FORMAT = "%Y-%m-%d %H:%M"
+
+# Supabase Database Configuration
+def get_db_config():
+    """Get database configuration from secrets or environment"""
+    try:
+        # Try to get database password (preferred for direct PostgreSQL connection)
+        password = st.secrets.get('SUPABASE_DB_PASSWORD', os.getenv('SUPABASE_DB_PASSWORD', ''))
+        # If no password, try API key (which might be used as password in some setups)
+        if not password:
+            password = st.secrets.get('SUPABASE_API_KEY', os.getenv('SUPABASE_API_KEY', ''))
+            # If API key format (starts with sbp_ or sb-), this won't work for direct PostgreSQL
+            # But we'll try it anyway in case it's actually a password
+    except:
+        password = os.getenv('SUPABASE_DB_PASSWORD', '') or os.getenv('SUPABASE_API_KEY', '')
+    
+    return {
+        'host': 'aws-1-ap-south-1.pooler.supabase.com',
+        'port': 6543,
+        'database': 'postgres',
+        'user': 'postgres.xrpmswlgatrshvgwtvjw',
+        'password': password
+    }
+
+def get_use_supabase():
+    """Check if Supabase should be used"""
+    try:
+        use_supabase = st.secrets.get('USE_SUPABASE', 'true').lower() == 'true'
+    except:
+        use_supabase = os.getenv('USE_SUPABASE', 'true').lower() == 'true'
+    return use_supabase
 
 # Initialize session state
 if 'meetings_df' not in st.session_state:
@@ -15,10 +49,152 @@ if 'meetings_df' not in st.session_state:
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'current_page' not in st.session_state:
-    st.session_state.current_page = "Add New Meeting"
+    st.session_state.current_page = "Add New Meeting"  # Default to Add New Meeting
+if 'selected_meetings' not in st.session_state:
+    st.session_state.selected_meetings = set()
+if 'db_pool' not in st.session_state:
+    st.session_state.db_pool = None
+if 'supabase_connected' not in st.session_state:
+    st.session_state.supabase_connected = False
+if 'supabase_error' not in st.session_state:
+    st.session_state.supabase_error = None
+# Podcast meetings session state
+if 'podcast_meetings_df' not in st.session_state:
+    st.session_state.podcast_meetings_df = pd.DataFrame()
+if 'podcast_data_loaded' not in st.session_state:
+    st.session_state.podcast_data_loaded = False
+if 'selected_podcast_meetings' not in st.session_state:
+    st.session_state.selected_podcast_meetings = set()
+
+@contextmanager
+def get_db_connection():
+    """Get database connection from pool or create new one"""
+    conn = None
+    try:
+        db_config = get_db_config()
+        if st.session_state.db_pool is not None:
+            conn = st.session_state.db_pool.getconn()
+        else:
+            conn = psycopg2.connect(**db_config)
+        yield conn
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if conn:
+            if st.session_state.db_pool is not None:
+                st.session_state.db_pool.putconn(conn)
+            else:
+                conn.close()
+
+def init_db_pool():
+    """Initialize database connection pool"""
+    try:
+        db_config = get_db_config()
+        if db_config.get('password') and not st.session_state.db_pool:
+            # Test connection first
+            try:
+                test_conn = psycopg2.connect(**db_config)
+                test_conn.close()
+                
+                # If test successful, create pool
+                st.session_state.db_pool = SimpleConnectionPool(
+                    minconn=1,
+                    maxconn=5,
+                    **db_config
+                )
+                st.session_state.supabase_connected = True
+                return True
+            except psycopg2.Error as e:
+                # Store error for display
+                st.session_state.supabase_error = str(e)
+                st.session_state.supabase_connected = False
+                return False
+        elif not db_config.get('password'):
+            st.session_state.supabase_connected = False
+            st.session_state.supabase_error = "No password configured"
+            return False
+        return st.session_state.supabase_connected
+    except Exception as e:
+        st.session_state.supabase_connected = False
+        st.session_state.supabase_error = str(e)
+        return False
+
+def load_meetings_from_supabase():
+    """Load meetings from Supabase database"""
+    db_config = get_db_config()
+    if not db_config.get('password'):
+        return None
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT 
+                        meeting_id as "Meeting ID",
+                        meeting_title as "Meeting Title",
+                        organization as "Organization",
+                        client as "Client",
+                        stakeholder_name as "Stakeholder Name",
+                        purpose as "Purpose",
+                        agenda as "Agenda",
+                        meeting_date as "Meeting Date",
+                        start_time as "Start Time",
+                        time_zone as "Time Zone",
+                        meeting_type as "Meeting Type",
+                        meeting_link as "Meeting Link",
+                        location as "Location",
+                        status as "Status",
+                        priority as "Priority",
+                        attendees as "Attendees",
+                        internal_external_guests as "Internal External Guests",
+                        notes as "Notes",
+                        next_action as "Next Action",
+                        follow_up_date as "Follow up Date",
+                        reminder_sent as "Reminder Sent",
+                        calendar_sync as "Calendar Sync",
+                        calendar_event_title as "Calendar Event Title"
+                    FROM meetings
+                    ORDER BY meeting_id
+                """)
+                rows = cur.fetchall()
+                
+                if rows:
+                    df = pd.DataFrame(rows)
+                    # Convert date columns
+                    if 'Meeting Date' in df.columns:
+                        df['Meeting Date'] = pd.to_datetime(df['Meeting Date'], errors='coerce')
+                    if 'Follow up Date' in df.columns:
+                        df['Follow up Date'] = pd.to_datetime(df['Follow up Date'], errors='coerce')
+                    # Convert time to string format
+                    if 'Start Time' in df.columns:
+                        df['Start Time'] = df['Start Time'].apply(
+                            lambda x: str(x).split('.')[0] if pd.notna(x) and x != '' else ''
+                        )
+                    return df
+                else:
+                    return pd.DataFrame(columns=[
+                        'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+                        'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+                        'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                        'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+                        'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
+                    ])
+    except Exception as e:
+        st.error(f"Error loading from Supabase: {e}")
+        return None
 
 def load_meetings():
-    """Load meetings from Excel file"""
+    """Load meetings from Supabase (if available) or Excel file"""
+    # Try Supabase first if enabled
+    if get_use_supabase() and init_db_pool():
+        df = load_meetings_from_supabase()
+        if df is not None:
+            return df
+    
+    # Fallback to Excel
     if os.path.exists(EXCEL_FILE):
         try:
             df = pd.read_excel(EXCEL_FILE)
@@ -59,14 +235,382 @@ def load_meetings():
             'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
         ])
 
-def save_meetings(df):
-    """Save meetings to Excel file"""
+def sync_excel_to_supabase(df=None):
+    """Sync Excel data to Supabase - used on initial load"""
+    if not get_use_supabase() or not init_db_pool():
+        return False
+    
+    # Use provided dataframe or load from Excel
+    if df is None:
+        if not os.path.exists(EXCEL_FILE):
+            return True  # No Excel file to sync
+        
+        try:
+            df = pd.read_excel(EXCEL_FILE)
+            if df.empty:
+                return True  # Empty Excel file
+        except Exception as e:
+            st.error(f"Error reading Excel file: {e}")
+            return False
+    
+    if df.empty:
+        return True
+    
     try:
-        df.to_excel(EXCEL_FILE, index=False)
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        # Ensure Meeting ID column exists
+        if 'Meeting ID' not in df.columns:
+            # Generate Meeting IDs if missing
+            df['Meeting ID'] = range(1, len(df) + 1)
+        
+        # Sync each row to Supabase
+        for idx, row in df.iterrows():
+            try:
+                # Ensure Meeting ID exists
+                if pd.isna(row.get('Meeting ID')):
+                    # Generate ID if missing
+                    row['Meeting ID'] = get_next_meeting_id(df) + idx
+                
+                if save_meeting_to_supabase(row):
+                    success_count += 1
+                else:
+                    error_count += 1
+                    errors.append(f"Row {idx + 1}: Failed to save")
+            except Exception as e:
+                error_count += 1
+                errors.append(f"Row {idx + 1}: {str(e)}")
+                continue
+        
+        if error_count > 0 and errors:
+            for error in errors[:5]:  # Show first 5 errors
+                st.warning(error)
+            if len(errors) > 5:
+                st.warning(f"... and {len(errors) - 5} more errors")
+        
+        return success_count > 0
+    except Exception as e:
+        st.error(f"Error syncing to Supabase: {e}")
+        return False
+
+def normalize_meeting_type(meeting_type):
+    """Normalize meeting type to valid database values: 'Virtual' or 'In Person'"""
+    if meeting_type is None or pd.isna(meeting_type):
+        return None
+    
+    # Convert to string and strip whitespace
+    meeting_type_str = str(meeting_type).strip()
+    
+    if not meeting_type_str or meeting_type_str.lower() in ['nan', 'none', 'null', '']:
+        return None
+    
+    # Normalize common variations
+    meeting_type_lower = meeting_type_str.lower()
+    
+    # Map to valid values: "Virtual" or "In Person"
+    if meeting_type_lower in ['online', 'virtual', 'email', 'zoom', 'teams', 'webex', 'google meet']:
+        return 'Virtual'
+    elif meeting_type_lower in ['physical', 'in person', 'in-person', 'onsite', 'on-site', 'office']:
+        return 'In Person'
+    elif meeting_type_str in ['Virtual', 'In Person']:
+        # Already valid, return as-is
+        return meeting_type_str
+    else:
+        # Default to Virtual for unknown types
+        return 'Virtual'
+
+def normalize_status(status):
+    """Normalize status to valid database values: 'Upcoming', 'Ongoing', 'Ended', 'Completed'"""
+    if status is None or pd.isna(status):
+        return 'Upcoming'  # Default status
+    
+    # Convert to string and strip whitespace
+    status_str = str(status).strip()
+    
+    if not status_str or status_str.lower() in ['nan', 'none', 'null', '']:
+        return 'Upcoming'  # Default status
+    
+    # Normalize common variations
+    status_lower = status_str.lower()
+    
+    # Map to valid values: "Upcoming", "Ongoing", "Ended", "Completed"
+    if status_lower in ['upcoming', 'scheduled', 'pending', 'planned', 'future']:
+        return 'Upcoming'
+    elif status_lower in ['ongoing', 'in progress', 'in-progress', 'active', 'running', 'started']:
+        return 'Ongoing'
+    elif status_lower == 'completed':
+        return 'Completed'
+    elif status_lower in ['ended', 'finished', 'done', 'closed', 'past']:
+        return 'Ended'
+    elif status_str in ['Upcoming', 'Ongoing', 'Ended', 'Completed']:
+        # Already valid, return as-is
+        return status_str
+    else:
+        # Default to Upcoming for unknown statuses
+        return 'Upcoming'
+
+def save_meeting_to_supabase(row):
+    """Save a single meeting row to Supabase"""
+    try:
+        # Ensure Meeting ID exists and is valid
+        meeting_id_value = row.get('Meeting ID') if 'Meeting ID' in row else None
+        
+        # Handle empty strings, NaN, None
+        if meeting_id_value is None or pd.isna(meeting_id_value) or (isinstance(meeting_id_value, str) and meeting_id_value.strip() == ''):
+            return False
+        
+        # Convert to int, handling string values
+        try:
+            meeting_id = int(float(str(meeting_id_value).strip()))
+        except (ValueError, TypeError):
+            return False
+            
+        if meeting_id is None or meeting_id <= 0:
+            return False
+            
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Check if meeting exists
+                cur.execute("SELECT id FROM meetings WHERE meeting_id = %s", (meeting_id,))
+                exists = cur.fetchone()
+                
+                if exists:
+                    # Update existing meeting
+                    cur.execute("""
+                        UPDATE meetings SET
+                            meeting_title = %s,
+                            organization = %s,
+                            client = %s,
+                            stakeholder_name = %s,
+                            purpose = %s,
+                            agenda = %s,
+                            meeting_date = %s,
+                            start_time = %s,
+                            time_zone = %s,
+                            meeting_type = %s,
+                            meeting_link = %s,
+                            location = %s,
+                            status = %s,
+                            priority = %s,
+                            attendees = %s,
+                            internal_external_guests = %s,
+                            notes = %s,
+                            next_action = %s,
+                            follow_up_date = %s,
+                            reminder_sent = %s,
+                            calendar_sync = %s,
+                            calendar_event_title = %s
+                        WHERE meeting_id = %s
+                    """, (
+                        row.get('Meeting Title', ''),
+                        row.get('Organization') if pd.notna(row.get('Organization')) else None,
+                        row.get('Client') if pd.notna(row.get('Client')) else None,
+                        row.get('Stakeholder Name', ''),
+                        row.get('Purpose') if pd.notna(row.get('Purpose')) else None,
+                        row.get('Agenda') if pd.notna(row.get('Agenda')) else None,
+                        row.get('Meeting Date') if pd.notna(row.get('Meeting Date')) else None,
+                        row.get('Start Time') if (pd.notna(row.get('Start Time')) and str(row.get('Start Time', '')).strip() != '') else None,
+                        row.get('Time Zone') if pd.notna(row.get('Time Zone')) else 'UTC',
+                        normalize_meeting_type(row.get('Meeting Type')),
+                        row.get('Meeting Link') if pd.notna(row.get('Meeting Link')) else None,
+                        row.get('Location') if pd.notna(row.get('Location')) else None,
+                        normalize_status(row.get('Status')),
+                        row.get('Priority') if pd.notna(row.get('Priority')) else 'Medium',
+                        row.get('Attendees') if pd.notna(row.get('Attendees')) else None,
+                        row.get('Internal External Guests', ''),
+                        row.get('Notes') if pd.notna(row.get('Notes')) else None,
+                        row.get('Next Action') if pd.notna(row.get('Next Action')) else None,
+                        row.get('Follow up Date') if pd.notna(row.get('Follow up Date')) else None,
+                        row.get('Reminder Sent') if pd.notna(row.get('Reminder Sent')) else 'No',
+                        row.get('Calendar Sync') if pd.notna(row.get('Calendar Sync')) else 'No',
+                        row.get('Calendar Event Title') if pd.notna(row.get('Calendar Event Title')) else None,
+                        meeting_id
+                    ))
+                else:
+                    # Insert new meeting
+                    cur.execute("""
+                        INSERT INTO meetings (
+                            meeting_id, meeting_title, organization, client, stakeholder_name,
+                            purpose, agenda, meeting_date, start_time, time_zone,
+                            meeting_type, meeting_link, location, status, priority,
+                            attendees, internal_external_guests, notes, next_action,
+                            follow_up_date, reminder_sent, calendar_sync, calendar_event_title
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                    """, (
+                        meeting_id,
+                        row.get('Meeting Title', ''),
+                        row.get('Organization') if pd.notna(row.get('Organization')) else None,
+                        row.get('Client') if pd.notna(row.get('Client')) else None,
+                        row.get('Stakeholder Name', ''),
+                        row.get('Purpose') if pd.notna(row.get('Purpose')) else None,
+                        row.get('Agenda') if pd.notna(row.get('Agenda')) else None,
+                        row.get('Meeting Date') if pd.notna(row.get('Meeting Date')) else None,
+                        row.get('Start Time') if (pd.notna(row.get('Start Time')) and str(row.get('Start Time', '')).strip() != '') else None,
+                        row.get('Time Zone') if pd.notna(row.get('Time Zone')) else 'UTC',
+                        normalize_meeting_type(row.get('Meeting Type')),
+                        row.get('Meeting Link') if pd.notna(row.get('Meeting Link')) else None,
+                        row.get('Location') if pd.notna(row.get('Location')) else None,
+                        normalize_status(row.get('Status')),
+                        row.get('Priority') if pd.notna(row.get('Priority')) else 'Medium',
+                        row.get('Attendees') if pd.notna(row.get('Attendees')) else None,
+                        row.get('Internal External Guests', ''),
+                        row.get('Notes') if pd.notna(row.get('Notes')) else None,
+                        row.get('Next Action') if pd.notna(row.get('Next Action')) else None,
+                        row.get('Follow up Date') if pd.notna(row.get('Follow up Date')) else None,
+                        row.get('Reminder Sent') if pd.notna(row.get('Reminder Sent')) else 'No',
+                        row.get('Calendar Sync') if pd.notna(row.get('Calendar Sync')) else 'No',
+                        row.get('Calendar Event Title') if pd.notna(row.get('Calendar Event Title')) else None
+                    ))
         return True
     except Exception as e:
-        st.error(f"Error saving meetings: {e}")
+        st.error(f"Error saving to Supabase: {e}")
         return False
+
+def delete_meeting_from_supabase(meeting_id):
+    """Delete a meeting from Supabase"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Disable the trigger first to prevent it from trying to insert into audit_log
+                trigger_disabled = False
+                try:
+                    cur.execute("ALTER TABLE meetings DISABLE TRIGGER log_meeting_changes_trigger")
+                    trigger_disabled = True
+                except Exception:
+                    # If we can't disable trigger, continue anyway
+                    pass
+                
+                # Delete audit log entries first to avoid foreign key constraint error
+                # The FK constraint prevents deleting meetings that are referenced in audit_log
+                try:
+                    cur.execute("DELETE FROM meetings_audit_log WHERE meeting_id = %s", (meeting_id,))
+                except Exception:
+                    # If audit log doesn't exist or has no entries, that's fine
+                    pass
+                
+                # Now delete the meeting
+                cur.execute("DELETE FROM meetings WHERE meeting_id = %s", (meeting_id,))
+                
+                # Check if any rows were actually deleted
+                if cur.rowcount == 0:
+                    # No rows deleted - meeting doesn't exist
+                    return False
+                
+                # Re-enable the trigger if we disabled it
+                if trigger_disabled:
+                    try:
+                        cur.execute("ALTER TABLE meetings ENABLE TRIGGER log_meeting_changes_trigger")
+                    except Exception:
+                        pass
+                        
+        return True
+    except Exception as e:
+        error_msg = str(e)
+        # Log the actual error for debugging
+        st.error(f"Error deleting from Supabase: {error_msg}")
+        return False
+
+def save_meetings(df):
+    """Save meetings to Supabase (if available) and/or Excel file - Real-time sync"""
+    if df.empty:
+        # If dataframe is empty, clear Supabase and Excel
+        if get_use_supabase() and init_db_pool():
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM meetings")
+            except Exception as e:
+                pass  # Ignore errors when clearing
+        
+        try:
+            # Create empty Excel with columns
+            template_columns = [
+                'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+                'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+                'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+                'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
+            ]
+            pd.DataFrame(columns=template_columns).to_excel(EXCEL_FILE, index=False)
+        except:
+            pass
+        return True
+    
+    success = True
+    supabase_success = True
+    
+    # Save to Supabase if enabled - sync ALL rows
+    if get_use_supabase() and init_db_pool():
+        try:
+            # First, get all existing meeting IDs from Supabase
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT meeting_id FROM meetings")
+                    existing_ids = {row[0] for row in cur.fetchall()}
+            
+            # Get current meeting IDs from dataframe
+            current_ids = set()
+            if 'Meeting ID' in df.columns:
+                current_ids = set(pd.to_numeric(df['Meeting ID'], errors='coerce').dropna().astype(int))
+            
+            # Delete meetings from Supabase that are not in current dataframe
+            ids_to_delete = existing_ids - current_ids
+            for meeting_id in ids_to_delete:
+                try:
+                    if not delete_meeting_from_supabase(meeting_id):
+                        # Log if delete failed
+                        pass
+                except Exception as delete_err:
+                    # Log delete errors but continue with other operations
+                    pass
+            
+            # Sync all rows to Supabase (insert or update)
+            sync_errors = []
+            for idx, row in df.iterrows():
+                # Check if Meeting ID exists and is valid (not empty string, not NaN)
+                meeting_id_val = row.get('Meeting ID') if 'Meeting ID' in row else None
+                if meeting_id_val is not None and pd.notna(meeting_id_val):
+                    # Check if it's not an empty string
+                    if isinstance(meeting_id_val, str) and meeting_id_val.strip() == '':
+                        continue  # Skip rows with empty string Meeting IDs
+                    try:
+                        # Try to convert to int to validate it's a valid ID
+                        int(float(str(meeting_id_val).strip()))
+                        if not save_meeting_to_supabase(row):
+                            supabase_success = False
+                            # Error message already displayed by save_meeting_to_supabase
+                    except (ValueError, TypeError):
+                        # Invalid Meeting ID, skip this row
+                        continue
+                else:
+                    # Missing Meeting ID - skip but don't fail entire sync
+                    continue
+            
+            # Only show general error if there were sync errors and no specific errors were shown
+            if not supabase_success and not sync_errors:
+                # Errors were already shown by save_meeting_to_supabase, just mark as failed
+                pass
+        except Exception as e:
+            st.error(f"Error syncing to Supabase: {e}")
+            supabase_success = False
+    
+    # Always save to Excel as backup
+    try:
+        df.to_excel(EXCEL_FILE, index=False)
+    except Exception as e:
+        if not get_use_supabase():
+            st.error(f"Error saving meetings to Excel: {e}")
+            return False
+        else:
+            # If Supabase works but Excel fails, still return success
+            pass
+    
+    return supabase_success if get_use_supabase() and init_db_pool() else True
 
 def calculate_status(row):
     """Calculate meeting status based on current time"""
@@ -111,8 +655,32 @@ def calculate_status(row):
     except:
         return "Upcoming"
 
+def get_next_meeting_id_from_supabase():
+    """Get next meeting ID from Supabase"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT get_next_meeting_id()")
+                result = cur.fetchone()
+                return result[0] if result else 1
+    except Exception as e:
+        # Fallback to database query if function doesn't exist
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COALESCE(MAX(meeting_id), 0) + 1 FROM meetings")
+                    result = cur.fetchone()
+                    return result[0] if result else 1
+        except:
+            return 1
+
 def get_next_meeting_id(df):
-    """Get the next available meeting ID"""
+    """Get the next available meeting ID from Supabase or DataFrame"""
+    # Try Supabase first if enabled
+    if get_use_supabase() and init_db_pool():
+        return get_next_meeting_id_from_supabase()
+    
+    # Fallback to DataFrame
     if df.empty or 'Meeting ID' not in df.columns:
         return 1
     meeting_ids = df['Meeting ID'].dropna()
@@ -157,13 +725,67 @@ def update_all_statuses(df):
     return df
 
 def load_data():
-    """Load data into session state"""
+    """Load data into session state with automatic sync"""
     if not st.session_state.data_loaded:
-        st.session_state.meetings_df = load_meetings()
+        # Try to load from Supabase first
+        if get_use_supabase() and init_db_pool():
+            supabase_df = load_meetings_from_supabase()
+            
+            # If Supabase has data, use it
+            if supabase_df is not None and not supabase_df.empty:
+                st.session_state.meetings_df = supabase_df
+                # Sync to Excel as backup
+                try:
+                    st.session_state.meetings_df.to_excel(EXCEL_FILE, index=False)
+                except:
+                    pass
+            # If Supabase is empty, use Excel data (but don't auto-sync)
+            elif supabase_df is not None and supabase_df.empty:
+                excel_df = None
+                if os.path.exists(EXCEL_FILE):
+                    try:
+                        excel_df = pd.read_excel(EXCEL_FILE)
+                        # Ensure all template columns exist
+                        template_columns = [
+                            'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+                            'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+                            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                            'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+                            'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
+                        ]
+                        for col in template_columns:
+                            if col not in excel_df.columns:
+                                excel_df[col] = ''
+                        
+                        # Convert date and time columns
+                        if 'Meeting Date' in excel_df.columns:
+                            excel_df['Meeting Date'] = pd.to_datetime(excel_df['Meeting Date'], errors='coerce')
+                        if 'Follow up Date' in excel_df.columns:
+                            excel_df['Follow up Date'] = pd.to_datetime(excel_df['Follow up Date'], errors='coerce')
+                    except:
+                        excel_df = None
+                
+                if excel_df is not None and not excel_df.empty:
+                    st.session_state.meetings_df = excel_df
+                else:
+                    st.session_state.meetings_df = pd.DataFrame(columns=[
+                        'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+                        'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+                        'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                        'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+                        'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
+                    ])
+            else:
+                # Supabase connection failed, fall back to Excel
+                st.session_state.meetings_df = load_meetings()
+        else:
+            # Supabase not enabled or connection failed, use Excel
+            st.session_state.meetings_df = load_meetings()
+        
         st.session_state.data_loaded = True
     
     # Only recalculate status for empty/NaN statuses on initial load
-    # Preserve all manually set statuses (they are saved to Excel)
+    # Preserve all manually set statuses (they are saved to Excel/Supabase)
     if not st.session_state.meetings_df.empty:
         if 'Status' in st.session_state.meetings_df.columns:
             # Only recalculate if status is empty/NaN (not set)
@@ -177,6 +799,7 @@ def load_data():
                     mask = st.session_state.meetings_df['Meeting ID'] == meeting_id
                     if mask.any():
                         st.session_state.meetings_df.loc[mask, 'Status'] = status
+            
 
 def filter_meetings(df, status_filter, date_start, date_end, search_text):
     """Filter meetings based on criteria"""
@@ -188,11 +811,32 @@ def filter_meetings(df, status_filter, date_start, date_end, search_text):
     
     # Date range filter
     if date_start and 'Meeting Date' in filtered_df.columns:
-        filtered_df = filtered_df[pd.to_datetime(filtered_df['Meeting Date'], errors='coerce') >= pd.to_datetime(date_start)]
+        # Convert Meeting Date to timezone-naive for comparison
+        meeting_dates = pd.to_datetime(filtered_df['Meeting Date'], errors='coerce')
+        # Remove timezone if present - convert to UTC first then remove timezone
+        try:
+            if meeting_dates.dt.tz is not None:
+                meeting_dates = meeting_dates.dt.tz_convert('UTC').dt.tz_localize(None)
+        except (AttributeError, TypeError):
+            # If already naive or conversion fails, use as-is
+            pass
+        # Convert date_start to datetime (already naive)
+        date_start_dt = pd.to_datetime(date_start)
+        filtered_df = filtered_df[meeting_dates >= date_start_dt]
+    
     if date_end and 'Meeting Date' in filtered_df.columns:
-        # Add end of day to date_end
+        # Convert Meeting Date to timezone-naive for comparison
+        meeting_dates = pd.to_datetime(filtered_df['Meeting Date'], errors='coerce')
+        # Remove timezone if present - convert to UTC first then remove timezone
+        try:
+            if meeting_dates.dt.tz is not None:
+                meeting_dates = meeting_dates.dt.tz_convert('UTC').dt.tz_localize(None)
+        except (AttributeError, TypeError):
+            # If already naive or conversion fails, use as-is
+            pass
+        # Add end of day to date_end (already naive)
         date_end_datetime = pd.to_datetime(date_end) + timedelta(days=1) - timedelta(seconds=1)
-        filtered_df = filtered_df[pd.to_datetime(filtered_df['Meeting Date'], errors='coerce') <= date_end_datetime]
+        filtered_df = filtered_df[meeting_dates <= date_end_datetime]
     
     # Search filter
     if search_text:
@@ -212,6 +856,291 @@ def filter_meetings(df, status_filter, date_start, date_end, search_text):
 
 # Load data
 load_data()
+
+# ============================================================================
+# PODCAST MEETINGS FUNCTIONS
+# ============================================================================
+
+def load_podcast_meetings_from_supabase():
+    """Load podcast meetings from Supabase database"""
+    db_config = get_db_config()
+    if not db_config.get('password'):
+        return None
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT 
+                        podcast_id as "Podcast ID",
+                        name as "Name",
+                        designation as "Designation",
+                        organization as "Organization",
+                        linkedin_url as "LinkedIn URL",
+                        host as "Host",
+                        date as "Date",
+                        day as "Day",
+                        time as "Time",
+                        status as "Status",
+                        contacted_through as "Contacted Through",
+                        comments as "Comments"
+                    FROM podcast_meetings
+                    ORDER BY podcast_id
+                """)
+                rows = cur.fetchall()
+                
+                if rows:
+                    df = pd.DataFrame(rows)
+                    if 'Date' in df.columns:
+                        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                    if 'Time' in df.columns:
+                        df['Time'] = df['Time'].apply(
+                            lambda x: str(x).split('.')[0] if pd.notna(x) and x != '' else ''
+                        )
+                    return df
+                else:
+                    return pd.DataFrame(columns=[
+                        'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                        'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+                    ])
+    except Exception as e:
+        st.error(f"Error loading podcast meetings from Supabase: {e}")
+        return None
+
+def load_podcast_meetings():
+    """Load podcast meetings from Supabase (if available) or Excel file"""
+    if get_use_supabase() and init_db_pool():
+        df = load_podcast_meetings_from_supabase()
+        if df is not None:
+            return df
+    
+    EXCEL_FILE_PODCAST = "Podcast_Meetings_Template.xlsx"
+    if os.path.exists(EXCEL_FILE_PODCAST):
+        try:
+            df = pd.read_excel(EXCEL_FILE_PODCAST)
+            template_columns = [
+                'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+            ]
+            for col in template_columns:
+                if col not in df.columns:
+                    df[col] = ''
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            return df
+        except Exception as e:
+            return pd.DataFrame(columns=[
+                'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+            ])
+    else:
+        return pd.DataFrame(columns=[
+            'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+            'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+        ])
+
+def normalize_podcast_status(status):
+    """Normalize podcast status to valid database values"""
+    if status is None or pd.isna(status):
+        return 'Upcoming'
+    status_str = str(status).strip()
+    if not status_str or status_str.lower() in ['nan', 'none', 'null', '']:
+        return 'Upcoming'
+    status_lower = status_str.lower()
+    if status_lower in ['upcoming', 'scheduled', 'pending', 'planned', 'future']:
+        return 'Upcoming'
+    elif status_lower in ['completed', 'done', 'finished']:
+        return 'Completed'
+    elif status_lower in ['cancelled', 'canceled']:
+        return 'Cancelled'
+    elif status_str in ['Upcoming', 'Completed', 'Cancelled']:
+        return status_str
+    else:
+        return 'Upcoming'
+
+def save_podcast_meeting_to_supabase(row):
+    """Save a single podcast meeting row to Supabase"""
+    try:
+        podcast_id_value = row.get('Podcast ID') if 'Podcast ID' in row else None
+        if podcast_id_value is None or pd.isna(podcast_id_value) or (isinstance(podcast_id_value, str) and podcast_id_value.strip() == ''):
+            return False
+        try:
+            podcast_id = int(float(str(podcast_id_value).strip()))
+        except (ValueError, TypeError):
+            return False
+        if podcast_id is None or podcast_id <= 0:
+            return False
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM podcast_meetings WHERE podcast_id = %s", (podcast_id,))
+                exists = cur.fetchone()
+                if exists:
+                    cur.execute("""
+                        UPDATE podcast_meetings SET
+                            name = %s, designation = %s, organization = %s, linkedin_url = %s,
+                            host = %s, date = %s, day = %s, time = %s, status = %s,
+                            contacted_through = %s, comments = %s
+                        WHERE podcast_id = %s
+                    """, (
+                        row.get('Name', ''),
+                        row.get('Designation') if pd.notna(row.get('Designation')) else None,
+                        row.get('Organization') if pd.notna(row.get('Organization')) else None,
+                        row.get('LinkedIn URL') if pd.notna(row.get('LinkedIn URL')) else None,
+                        row.get('Host') if pd.notna(row.get('Host')) else None,
+                        row.get('Date') if pd.notna(row.get('Date')) else None,
+                        row.get('Day') if pd.notna(row.get('Day')) else None,
+                        row.get('Time') if (pd.notna(row.get('Time')) and str(row.get('Time', '')).strip() != '') else None,
+                        normalize_podcast_status(row.get('Status')),
+                        row.get('Contacted Through') if pd.notna(row.get('Contacted Through')) else None,
+                        row.get('Comments') if pd.notna(row.get('Comments')) else None,
+                        podcast_id
+                    ))
+                else:
+                    cur.execute("""
+                        INSERT INTO podcast_meetings (
+                            podcast_id, name, designation, organization, linkedin_url,
+                            host, date, day, time, status, contacted_through, comments
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                    """, (
+                        podcast_id, row.get('Name', ''),
+                        row.get('Designation') if pd.notna(row.get('Designation')) else None,
+                        row.get('Organization') if pd.notna(row.get('Organization')) else None,
+                        row.get('LinkedIn URL') if pd.notna(row.get('LinkedIn URL')) else None,
+                        row.get('Host') if pd.notna(row.get('Host')) else None,
+                        row.get('Date') if pd.notna(row.get('Date')) else None,
+                        row.get('Day') if pd.notna(row.get('Day')) else None,
+                        row.get('Time') if (pd.notna(row.get('Time')) and str(row.get('Time', '')).strip() != '') else None,
+                        normalize_podcast_status(row.get('Status')),
+                        row.get('Contacted Through') if pd.notna(row.get('Contacted Through')) else None,
+                        row.get('Comments') if pd.notna(row.get('Comments')) else None
+                    ))
+        return True
+    except Exception as e:
+        st.error(f"Error saving podcast meeting to Supabase: {e}")
+        return False
+
+def delete_podcast_meeting_from_supabase(podcast_id):
+    """Delete a podcast meeting from Supabase"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("DELETE FROM podcast_meetings_audit_log WHERE podcast_id = %s", (podcast_id,))
+                except Exception:
+                    pass
+                cur.execute("DELETE FROM podcast_meetings WHERE podcast_id = %s", (podcast_id,))
+                if cur.rowcount == 0:
+                    return False
+        return True
+    except Exception as e:
+        st.error(f"Error deleting podcast meeting from Supabase: {e}")
+        return False
+
+def save_podcast_meetings(df):
+    """Save podcast meetings to Supabase (if available) and/or Excel file"""
+    EXCEL_FILE_PODCAST = "Podcast_Meetings_Template.xlsx"
+    if df.empty:
+        if get_use_supabase() and init_db_pool():
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM podcast_meetings")
+            except Exception:
+                pass
+        try:
+            template_columns = [
+                'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+            ]
+            pd.DataFrame(columns=template_columns).to_excel(EXCEL_FILE_PODCAST, index=False)
+        except:
+            pass
+        return True
+    success = True
+    supabase_success = True
+    if get_use_supabase() and init_db_pool():
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT podcast_id FROM podcast_meetings")
+                    existing_ids = {row[0] for row in cur.fetchall()}
+            for idx, row in df.iterrows():
+                try:
+                    if not save_podcast_meeting_to_supabase(row):
+                        supabase_success = False
+                except Exception as e:
+                    supabase_success = False
+                    st.warning(f"Error syncing podcast meeting row {idx + 1}: {str(e)}")
+            if supabase_success:
+                df_ids = set()
+                for idx, row in df.iterrows():
+                    podcast_id = row.get('Podcast ID')
+                    if pd.notna(podcast_id):
+                        try:
+                            df_ids.add(int(float(str(podcast_id).strip())))
+                        except:
+                            pass
+                ids_to_delete = existing_ids - df_ids
+                for podcast_id in ids_to_delete:
+                    try:
+                        delete_podcast_meeting_from_supabase(podcast_id)
+                    except Exception as e:
+                        st.warning(f"Error deleting podcast meeting {podcast_id}: {str(e)}")
+        except Exception as e:
+            st.error(f"Error syncing podcast meetings to Supabase: {str(e)}")
+            supabase_success = False
+    try:
+        df.to_excel(EXCEL_FILE_PODCAST, index=False)
+    except Exception as e:
+        st.error(f"Error saving podcast meetings to Excel: {e}")
+        success = False
+    return success and supabase_success
+
+def get_next_podcast_id_from_supabase():
+    """Get next podcast ID from Supabase"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(MAX(podcast_id), 0) + 1 FROM podcast_meetings")
+                result = cur.fetchone()
+                return result[0] if result else 1
+    except:
+        return 1
+
+def get_next_podcast_id(df):
+    """Get the next available podcast ID from Supabase or DataFrame"""
+    if get_use_supabase() and init_db_pool():
+        return get_next_podcast_id_from_supabase()
+    if df.empty or 'Podcast ID' not in df.columns:
+        return 1
+    podcast_ids = df['Podcast ID'].dropna()
+    if podcast_ids.empty:
+        return 1
+    try:
+        numeric_ids = pd.to_numeric(podcast_ids, errors='coerce').dropna()
+        if numeric_ids.empty:
+            return 1
+        return int(numeric_ids.max()) + 1
+    except:
+        return 1
+
+def load_podcast_data():
+    """Load podcast meetings data into session state"""
+    if not st.session_state.podcast_data_loaded:
+        if get_use_supabase() and init_db_pool():
+            supabase_df = load_podcast_meetings_from_supabase()
+            if supabase_df is not None:
+                st.session_state.podcast_meetings_df = supabase_df
+            else:
+                st.session_state.podcast_meetings_df = load_podcast_meetings()
+        else:
+            st.session_state.podcast_meetings_df = load_podcast_meetings()
+        st.session_state.podcast_data_loaded = True
+
+# Load podcast data on startup
+load_podcast_data()
 
 # Page configuration
 st.set_page_config(
@@ -261,6 +1190,57 @@ st.markdown("""
         border-bottom: 3px solid transparent;
         border-image: linear-gradient(to right, #2563eb, #7c3aed) 1;
         letter-spacing: -0.5px;
+    }
+    
+    /* Ensure emojis render with native colors */
+    span[style*="Emoji"] {
+        font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', 'EmojiOne Color', 'Android Emoji', emoji, sans-serif !important;
+        color: initial !important;
+        background: none !important;
+        -webkit-background-clip: initial !important;
+        -webkit-text-fill-color: initial !important;
+        background-clip: initial !important;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+    }
+    
+    /* Prevent gradient from affecting emojis */
+    h1 span[style*="Emoji"] {
+        background: none !important;
+        -webkit-background-clip: initial !important;
+        -webkit-text-fill-color: initial !important;
+        background-clip: initial !important;
+    }
+    
+    /* Table cell text wrapping and truncation - prevent stacking */
+    .stColumn {
+        overflow-wrap: break-word;
+        word-break: break-word;
+        line-height: 1.5 !important;
+        padding: 0.5rem 0.25rem !important;
+        vertical-align: top !important;
+    }
+    
+    /* Ensure table headers are fully visible */
+    small strong {
+        white-space: nowrap;
+        display: block;
+        line-height: 1.4;
+    }
+    
+    /* Prevent text from stacking in table cells */
+    .stColumn small {
+        display: block;
+        line-height: 1.5;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+        white-space: normal;
+        max-width: 100%;
+    }
+    
+    /* Ensure proper spacing between table rows */
+    hr {
+        margin: 0.5rem 0 !important;
     }
     
     h2 {
@@ -710,14 +1690,19 @@ st.markdown("""
 # Enhanced Sidebar Navigation
 st.sidebar.markdown("""
 <div style="text-align: center; padding: 1.5rem 0; border-bottom: 2px solid #e2e8f0; margin-bottom: 1.5rem;">
-    <h1 style="background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
-               -webkit-background-clip: text;
-               -webkit-text-fill-color: transparent;
-               background-clip: text;
-               font-size: 1.75rem;
+    <h1 style="font-size: 1.75rem;
                font-weight: 700;
                margin: 0;
-               padding: 0;">📅 Meeting Dashboard</h1>
+               padding: 0;
+               display: flex;
+               align-items: center;
+               gap: 0.5rem;">
+        <span style="font-size: 1.75rem; line-height: 1; font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', 'EmojiOne Color', 'Android Emoji', emoji, sans-serif; display: inline-block; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;">📅</span>
+        <span style="background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+                     -webkit-background-clip: text;
+                     -webkit-text-fill-color: transparent;
+                     background-clip: text;">Meeting Dashboard</span>
+    </h1>
     <p style="color: #64748b; font-size: 0.85rem; margin: 0.5rem 0 0 0;">AI Geo Navigators</p>
 </div>
 """, unsafe_allow_html=True)
@@ -725,61 +1710,117 @@ st.sidebar.markdown("""
 # Page selection with enhanced styling
 st.sidebar.markdown("<h3 style='font-size: 1rem; color: #475569; margin-bottom: 0.75rem; font-weight: 600;'>📑 Navigate to:</h3>", unsafe_allow_html=True)
 
+# All pages in a single radio group for single selection
+all_pages = [
+    "➕ Add New Meeting", 
+    "✏️ Edit/Update Meeting", 
+    "📊 Meetings Summary & Export",
+    "➕ Add New Podcast Meeting", 
+    "✏️ Edit/Update Podcast Meeting", 
+    "📊 Podcast Meetings Summary & Export"
+]
+
+# Calculate index based on current page (default to 0 = Add New Meeting)
+current_index = 0
+if st.session_state.current_page == "Add New Meeting":
+    current_index = 0
+elif st.session_state.current_page == "Edit/Update Meeting":
+    current_index = 1
+elif st.session_state.current_page == "Meetings Summary & Export":
+    current_index = 2
+elif st.session_state.current_page == "Add New Podcast Meeting":
+    current_index = 3
+elif st.session_state.current_page == "Edit/Update Podcast Meeting":
+    current_index = 4
+elif st.session_state.current_page == "Podcast Meetings Summary & Export":
+    current_index = 5
+
 page = st.sidebar.radio(
     "Navigate to:",
-    ["1️⃣ Add New Meeting", "2️⃣ Edit or Delete Meeting", "3️⃣ Meetings Summary & Export"],
-    index=0 if st.session_state.current_page == "Add New Meeting" else 
-          1 if st.session_state.current_page == "Edit or Delete Meeting" else 2,
+    all_pages,
+    index=current_index,
     label_visibility="collapsed"
 )
 
 # Update current page based on selection
-if "Add New Meeting" in page:
+if "Add New Meeting" in page and "Podcast" not in page:
     st.session_state.current_page = "Add New Meeting"
-elif "Edit or Delete" in page:
-    st.session_state.current_page = "Edit or Delete Meeting"
-elif "Summary" in page:
+elif "Edit/Update Meeting" in page and "Podcast" not in page:
+    st.session_state.current_page = "Edit/Update Meeting"
+elif "Meetings Summary" in page and "Podcast" not in page:
     st.session_state.current_page = "Meetings Summary & Export"
+    # Refresh button below Meetings Summary & Export
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Refresh", help="Reload data from database", use_container_width=True, key="refresh_btn"):
+        # Reset data loaded flag to force reload
+        st.session_state.data_loaded = False
+        # Clear and reload data
+        with st.spinner("Refreshing data..."):
+            load_data()
+            st.sidebar.success("✅ Data refreshed!")
+            st.rerun()
+elif "Add New Podcast" in page:
+    st.session_state.current_page = "Add New Podcast Meeting"
+elif "Edit/Update Podcast" in page:
+    st.session_state.current_page = "Edit/Update Podcast Meeting"
+elif "Podcast Meetings Summary" in page:
+    st.session_state.current_page = "Podcast Meetings Summary & Export"
+    # Refresh button below Podcast Meetings Summary & Export
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Refresh", help="Reload podcast data from database", use_container_width=True, key="refresh_podcast_btn"):
+        # Reset podcast data loaded flag to force reload
+        st.session_state.podcast_data_loaded = False
+        # Clear and reload podcast data
+        with st.spinner("Refreshing podcast data..."):
+            load_podcast_data()
+            st.sidebar.success("✅ Podcast data refreshed!")
+            st.rerun()
 
-# Sidebar - Auto-refresh configuration
+# Sidebar - Manual Sync
 st.sidebar.markdown("---")
-st.sidebar.markdown("<h3 style='font-size: 1rem; color: #475569; margin-bottom: 0.75rem; font-weight: 600;'>⚙️ Settings</h3>", unsafe_allow_html=True)
+st.sidebar.markdown("<h3 style='font-size: 1rem; color: #475569; margin-bottom: 0.75rem; font-weight: 600;'>🗄️ Database Sync</h3>", unsafe_allow_html=True)
 
-auto_refresh_enabled = st.sidebar.checkbox("🔄 Enable Auto-refresh (60s)", value=False)
-
-if st.sidebar.button("🔄 Refresh Status Now", help="Manually update all meeting statuses"):
-    if not st.session_state.meetings_df.empty:
-        st.session_state.meetings_df = update_all_statuses(st.session_state.meetings_df)
-        st.sidebar.success("✅ Status updated!")
-        st.rerun()
+# Show connection status
+db_config = get_db_config()
+if db_config.get('password'):
+    if get_use_supabase() and init_db_pool():
+        st.sidebar.success("✅ Connected to Supabase")
+        
+        # Manual sync button only
+        if st.sidebar.button("🔄 Sync", help="Sync current data to Supabase", use_container_width=True, key="sync_btn"):
+            if not st.session_state.meetings_df.empty:
+                with st.spinner("Syncing to database..."):
+                    if save_meetings(st.session_state.meetings_df):
+                        st.sidebar.success("✅ Sync completed!")
+                    else:
+                        st.sidebar.error("❌ Sync failed. Check errors above.")
+            else:
+                st.sidebar.info("No meetings to sync.")
     else:
-        st.sidebar.info("No meetings to update.")
-
-# Handle auto-refresh
-if auto_refresh_enabled:
-    if not st.session_state.meetings_df.empty:
-        st.session_state.meetings_df = update_all_statuses(st.session_state.meetings_df)
-    
-    auto_refresh_js = """
-    <script>
-    function setupAutoRefresh() {
-        setTimeout(function() {
-            window.location.reload();
-        }, 60000);
-    }
-    setupAutoRefresh();
-    </script>
-    """
-    st.components.v1.html(auto_refresh_js, height=0)
-    st.sidebar.caption("🔄 Auto-refresh enabled")
+        st.sidebar.warning("⚠️ Supabase connection failed")
+        if st.session_state.supabase_error:
+            with st.sidebar.expander("🔍 Error Details"):
+                st.caption(st.session_state.supabase_error[:300])
+else:
+    if not db_config.get('password'):
+        st.sidebar.warning("⚠️ Database password not configured")
+        st.sidebar.caption("Set SUPABASE_DB_PASSWORD in secrets.toml")
+    else:
+        st.sidebar.warning("⚠️ Supabase connection failed")
+        if st.session_state.supabase_error:
+            with st.sidebar.expander("🔍 Error Details"):
+                st.caption(st.session_state.supabase_error[:300])
 
 # Enhanced Main Title with better visual hierarchy
 page_titles = {
     "Add New Meeting": "➕ Add New Meeting",
-    "Edit or Delete Meeting": "✏️ Edit or Delete Meeting",
-    "Meetings Summary & Export": "📊 Meetings Summary & Export"
+    "Edit/Update Meeting": "✏️ Edit/Update Meeting",
+    "Meetings Summary & Export": "📊 Meetings Summary & Export",
+    "Add New Podcast Meeting": "➕ Add New Podcast Meeting",
+    "Edit/Update Podcast Meeting": "✏️ Edit/Update Podcast Meeting",
+    "Podcast Meetings Summary & Export": "📊 Podcast Meetings Summary & Export"
 }
-page_icon = "➕" if st.session_state.current_page == "Add New Meeting" else ("✏️" if st.session_state.current_page == "Edit or Delete Meeting" else "📊")
+page_icon = "➕" if "Add New" in st.session_state.current_page else ("✏️" if "Edit" in st.session_state.current_page else "📊")
 
 st.markdown(f"""
 <div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
@@ -788,15 +1829,20 @@ st.markdown(f"""
             margin-bottom: 2rem;
             border-left: 5px solid #2563eb;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-    <h1 style="background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
-               -webkit-background-clip: text;
-               -webkit-text-fill-color: transparent;
-               background-clip: text;
-               font-size: 2.5rem;
+    <h1 style="font-size: 2.5rem;
                font-weight: 700;
                margin: 0;
                padding: 0;
-               border: none;">{page_icon} {st.session_state.current_page}</h1>
+               border: none;
+               display: flex;
+               align-items: center;
+               gap: 0.5rem;">
+        <span style="font-size: 2.5rem; line-height: 1; font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', 'EmojiOne Color', 'Android Emoji', emoji, sans-serif; display: inline-block; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;">{page_icon}</span>
+        <span style="background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+                     -webkit-background-clip: text;
+                     -webkit-text-fill-color: transparent;
+                     background-clip: text;">{st.session_state.current_page}</span>
+    </h1>
     <p style="color: #64748b; margin: 0.5rem 0 0 0; font-size: 1rem;">AI Geo Navigators Meeting Management System</p>
 </div>
 """, unsafe_allow_html=True)
@@ -978,7 +2024,7 @@ if st.session_state.current_page == "Add New Meeting":
                     'Internal External Guests': internal_external_guests.strip(),
                     'Notes': notes.strip(),
                     'Next Action': next_action.strip(),
-                    'Follow up Date': follow_up_date if follow_up_date else '',
+                    'Follow up Date': follow_up_date if follow_up_date else pd.NaT,
                     'Reminder Sent': reminder_sent,
                     'Calendar Sync': calendar_sync,
                     'Calendar Event Title': calendar_event_title.strip()
@@ -1004,11 +2050,11 @@ if st.session_state.current_page == "Add New Meeting":
                     st.error("Failed to save meeting")
 
 # ============================================================================
-# PAGE 2: Edit or Delete Meeting
+# PAGE 2: Edit/Update Meeting
 # ============================================================================
-elif st.session_state.current_page == "Edit or Delete Meeting":
-    st.markdown("### ✏️ Edit or Delete an Existing Meeting")
-    st.markdown("Select a meeting from the list below to edit or delete it.")
+elif st.session_state.current_page == "Edit/Update Meeting":
+    st.markdown("### ✏️ Edit/Update an Existing Meeting")
+    st.markdown("Select a meeting from the list below to edit or update it.")
     
     if not st.session_state.meetings_df.empty:
         # Create selection list with index tracking for reliable lookup
@@ -1232,11 +2278,7 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
             edit_calendar_event_title = st.text_input("Calendar Event Title", 
                                                       value=str(selected_meeting.get('Calendar Event Title', '')))
             
-            col_btn1, col_btn2 = st.columns([1, 1])
-            with col_btn1:
-                update_submitted = st.form_submit_button("💾 Update Meeting", type="primary", use_container_width=True)
-            with col_btn2:
-                pass  # Delete button is outside form
+            update_submitted = st.form_submit_button("💾 Update Meeting", type="primary", use_container_width=True)
             
             if update_submitted:
                 # Auto-fill missing required fields with empty strings (null) instead of showing errors
@@ -1285,7 +2327,7 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                     st.session_state.meetings_df.at[idx, 'Stakeholder Name'] = edit_stakeholder_name.strip() if edit_stakeholder_name.strip() else ''
                     st.session_state.meetings_df.at[idx, 'Purpose'] = edit_purpose.strip() if edit_purpose else ''
                     st.session_state.meetings_df.at[idx, 'Agenda'] = edit_agenda.strip() if edit_agenda else ''
-                    st.session_state.meetings_df.at[idx, 'Meeting Date'] = edit_meeting_date if edit_meeting_date else ''
+                    st.session_state.meetings_df.at[idx, 'Meeting Date'] = edit_meeting_date if edit_meeting_date else pd.NaT
                     st.session_state.meetings_df.at[idx, 'Start Time'] = edit_start_time.strftime('%H:%M:%S') if edit_start_time else ''
                     st.session_state.meetings_df.at[idx, 'Time Zone'] = edit_time_zone.strip() if edit_time_zone else ''
                     st.session_state.meetings_df.at[idx, 'Meeting Type'] = edit_meeting_type if edit_meeting_type else ''
@@ -1297,7 +2339,7 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                     st.session_state.meetings_df.at[idx, 'Internal External Guests'] = edit_internal_external_guests.strip() if edit_internal_external_guests.strip() else ''
                     st.session_state.meetings_df.at[idx, 'Notes'] = edit_notes.strip() if edit_notes else ''
                     st.session_state.meetings_df.at[idx, 'Next Action'] = edit_next_action.strip() if edit_next_action else ''
-                    st.session_state.meetings_df.at[idx, 'Follow up Date'] = edit_follow_up_date if edit_follow_up_date else ''
+                    st.session_state.meetings_df.at[idx, 'Follow up Date'] = edit_follow_up_date if edit_follow_up_date else pd.NaT
                     st.session_state.meetings_df.at[idx, 'Reminder Sent'] = edit_reminder_sent if edit_reminder_sent else ''
                     st.session_state.meetings_df.at[idx, 'Calendar Sync'] = edit_calendar_sync if edit_calendar_sync else ''
                     st.session_state.meetings_df.at[idx, 'Calendar Event Title'] = edit_calendar_event_title.strip() if edit_calendar_event_title else ''
@@ -1309,127 +2351,11 @@ elif st.session_state.current_page == "Edit or Delete Meeting":
                             st.session_state.manually_set_statuses = {}
                         st.session_state.manually_set_statuses[selected_meeting_id] = edit_status
                         
-                        # Get old status for comparison
-                        old_status = selected_meeting.get('Status', 'N/A')
-                        new_status = edit_status
-                        
-                        # Show success message with status update information
-                        if old_status != new_status:
-                            status_msg = f"✅ Meeting updated successfully! Status changed from '{old_status}' to '{new_status}'"
-                        else:
-                            status_msg = f"✅ Meeting updated successfully! Current status: '{new_status}'"
-                        
-                        st.success(status_msg)
-                        st.balloons()
+                        st.success("Meeting Updated Successfully")
                         time.sleep(1.5)
                         st.rerun()
                     else:
                         st.error("Failed to update meeting")
-        
-        # Delete button (outside form)
-        st.markdown("---")
-        st.markdown("### 🗑️ Delete Meeting")
-        
-        if 'confirm_delete' not in st.session_state:
-            st.session_state.confirm_delete = False
-        
-        if st.button("🗑️ Delete This Meeting", type="secondary", use_container_width=True):
-            st.session_state.confirm_delete = True
-        
-        if st.session_state.confirm_delete:
-            st.warning("⚠️ **Are you sure you want to delete this meeting?** This action cannot be undone.")
-            
-            # Use the same index lookup logic as in update
-            delete_idx = None
-            if 'selected_meeting_index' in st.session_state:
-                stored_idx = st.session_state.selected_meeting_index
-                if stored_idx in st.session_state.meetings_df.index:
-                    delete_idx = stored_idx
-            
-            if delete_idx is None and 'Meeting ID' in st.session_state.meetings_df.columns:
-                try:
-                    mask = st.session_state.meetings_df['Meeting ID'] == selected_meeting_id
-                    if not mask.any():
-                        mask = st.session_state.meetings_df['Meeting ID'].astype(str) == str(selected_meeting_id)
-                    if mask.any():
-                        delete_idx = st.session_state.meetings_df[mask].index[0]
-                except (IndexError, KeyError):
-                    pass
-            
-            if delete_idx is None and selected_meeting_label in meeting_index_map:
-                try:
-                    potential_idx = meeting_index_map[selected_meeting_label]
-                    if potential_idx in st.session_state.meetings_df.index:
-                        delete_idx = potential_idx
-                except (KeyError, IndexError):
-                    pass
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Confirm Delete", type="primary", use_container_width=True):
-                    # Remove meeting using the stored index
-                    delete_idx = None
-                    
-                    # First, try to use the stored index from session state
-                    if 'selected_meeting_index' in st.session_state:
-                        stored_idx = st.session_state.selected_meeting_index
-                        if stored_idx in st.session_state.meetings_df.index:
-                            delete_idx = stored_idx
-                    
-                    # If stored index not available, try to find by Meeting ID
-                    if delete_idx is None and 'Meeting ID' in st.session_state.meetings_df.columns:
-                        try:
-                            mask = st.session_state.meetings_df['Meeting ID'] == selected_meeting_id
-                            if not mask.any():
-                                mask = st.session_state.meetings_df['Meeting ID'].astype(str) == str(selected_meeting_id)
-                            if mask.any():
-                                delete_idx = st.session_state.meetings_df[mask].index[0]
-                        except (IndexError, KeyError):
-                            pass
-                    
-                    # If still not found, try using the meeting_index_map
-                    if delete_idx is None and selected_meeting_label in meeting_index_map:
-                        try:
-                            potential_idx = meeting_index_map[selected_meeting_label]
-                            if potential_idx in st.session_state.meetings_df.index:
-                                delete_idx = potential_idx
-                        except (KeyError, IndexError):
-                            pass
-                    
-                    # Delete the meeting using the found index
-                    if delete_idx is not None:
-                        st.session_state.meetings_df = st.session_state.meetings_df.drop(delete_idx)
-                    else:
-                        # Fallback: filter by Meeting ID
-                        if 'Meeting ID' in st.session_state.meetings_df.columns:
-                            try:
-                                mask = st.session_state.meetings_df['Meeting ID'] != selected_meeting_id
-                                if not mask.all():  # If any match, filter them out
-                                    # Try string comparison if needed
-                                    mask = st.session_state.meetings_df['Meeting ID'].astype(str) != str(selected_meeting_id)
-                                st.session_state.meetings_df = st.session_state.meetings_df[mask]
-                            except Exception as e:
-                                st.error(f"❌ Error deleting meeting: {str(e)}")
-                                st.stop()
-                        else:
-                            # Last resort: delete first row (not ideal)
-                            if not st.session_state.meetings_df.empty:
-                                st.session_state.meetings_df = st.session_state.meetings_df.drop(st.session_state.meetings_df.index[0])
-                            else:
-                                st.error("❌ Could not find the meeting to delete.")
-                                st.stop()
-                    
-                    # Save to Excel
-                    if save_meetings(st.session_state.meetings_df):
-                        st.session_state.confirm_delete = False
-                        st.success("✅ Meeting deleted successfully!")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("Failed to delete meeting")
-            with col2:
-                if st.button("❌ Cancel", use_container_width=True):
-                    st.session_state.confirm_delete = False
-                    st.rerun()
     else:
         st.info("📭 No meetings available to edit or delete. Add a meeting first using the 'Add New Meeting' page.")
 
@@ -1479,6 +2405,372 @@ elif st.session_state.current_page == "Meetings Summary & Export":
         )
     else:
         filtered_meetings = pd.DataFrame()
+    
+    # Import/Upload section - moved to top for better visibility
+    st.markdown("---")
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+                padding: 1.5rem;
+                border-radius: 12px;
+                margin-bottom: 1.5rem;
+                border-left: 4px solid #f59e0b;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);">
+        <h2 style="margin: 0; color: #1e293b; font-size: 1.5rem; font-weight: 600;">📤 Import/Update from Excel</h2>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Template download option
+    col_template1, col_template2 = st.columns([3, 1])
+    with col_template1:
+        st.write("Upload an Excel file to import or update meeting records. Download the template below to ensure correct format.")
+    with col_template2:
+        # Create template dataframe with all template columns
+        template_columns = [
+            'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+            'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+            'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+            'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
+        ]
+        template_df = pd.DataFrame(columns=template_columns)
+        # Add sample row
+        template_df = pd.concat([template_df, pd.DataFrame([{
+            'Meeting ID': 1,
+            'Meeting Title': 'Sample Meeting',
+            'Organization': 'Sample Org',
+            'Client': 'Sample Client',
+            'Stakeholder Name': 'Jane Smith',
+            'Purpose': 'Sample Purpose',
+            'Agenda': 'Sample agenda items',
+            'Meeting Date': datetime.now().date(),
+            'Start Time': datetime.now().time().strftime('%H:%M:%S'),
+            'Time Zone': 'UTC',
+            'Meeting Type': 'Virtual',
+            'Meeting Link': 'https://meet.example.com',
+            'Location': '',
+            'Status': 'Upcoming',
+            'Priority': 'Medium',
+            'Attendees': 'Team Member 1, Team Member 2',
+            'Internal External Guests': 'Client A, Client B',
+            'Notes': 'Sample notes',
+            'Next Action': 'Follow up required',
+            'Follow up Date': '',
+            'Reminder Sent': 'No',
+            'Calendar Sync': 'No',
+            'Calendar Event Title': 'Sample Meeting'
+        }])], ignore_index=True)
+        
+        # Save template to bytes
+        import io
+        template_buffer = io.BytesIO()
+        template_df.to_excel(template_buffer, index=False)
+        template_buffer.seek(0)
+        
+        st.download_button(
+            label="📥 Download Template",
+            data=template_buffer,
+            file_name="meeting_import_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Download a template Excel file with the correct column format",
+            use_container_width=True
+        )
+    
+    uploaded_file = st.file_uploader(
+        "Choose an Excel file to import",
+        type=['xlsx', 'xls'],
+        help="Upload an Excel file with meeting data. Required columns: Meeting Title. All other columns are optional."
+    )
+    
+    if uploaded_file is not None:
+        try:
+            # Read the uploaded file - try with header=0 first
+            import_df = pd.read_excel(uploaded_file, header=0)
+            
+            # If we got "Unnamed" columns, try to find the header row
+            if any('Unnamed' in str(col) for col in import_df.columns) or (len(import_df.columns) > 0 and str(import_df.columns[0]).startswith('Unnamed')):
+                # Try reading without header first to see the data
+                temp_df = pd.read_excel(uploaded_file, header=None)
+                # Look for a row that contains "Meeting Title" or "meeting title" (case-insensitive)
+                header_row = None
+                for idx in range(min(5, len(temp_df))):  # Check first 5 rows
+                    row_values = [str(val).strip().lower() for val in temp_df.iloc[idx].values if pd.notna(val)]
+                    if any('meeting title' in str(val).lower() or 'title' in str(val).lower() for val in row_values):
+                        header_row = idx
+                        break
+                
+                if header_row is not None:
+                    # Re-read with the correct header row
+                    import_df = pd.read_excel(uploaded_file, header=header_row)
+                else:
+                    # If no header row found, use first row as header
+                    import_df = pd.read_excel(uploaded_file, header=0)
+                    # If still unnamed, try header=None and use first row
+                    if any('Unnamed' in str(col) for col in import_df.columns):
+                        temp_df = pd.read_excel(uploaded_file, header=None)
+                        if len(temp_df) > 0:
+                            # Use first row as column names
+                            import_df.columns = [str(val).strip() if pd.notna(val) else f'Unnamed_{i}' for i, val in enumerate(temp_df.iloc[0].values)]
+                            import_df = temp_df.iloc[1:].copy()
+                            import_df.columns = [str(val).strip() if pd.notna(val) else f'Unnamed_{i}' for i, val in enumerate(import_df.columns)]
+            
+            # Normalize column names (strip whitespace and make case-insensitive mapping)
+            column_mapping = {}
+            for col in import_df.columns:
+                normalized = str(col).strip()
+                if normalized and not normalized.startswith('Unnamed'):
+                    column_mapping[normalized.lower()] = col
+            
+            # Check only critical required columns (case-insensitive)
+            critical_required_columns = ['meeting title']
+            missing_critical = []
+            found_columns = {}
+            
+            for req_col in critical_required_columns:
+                if req_col.lower() in column_mapping:
+                    found_columns[req_col] = column_mapping[req_col.lower()]
+                else:
+                    missing_critical.append(req_col)
+            
+            if missing_critical:
+                st.error(f"❌ Missing critical required column: {', '.join([c.title() for c in missing_critical])}")
+                st.info("At minimum, 'Meeting Title' column is required. Other missing columns will be filled with empty values.")
+                st.info(f"📋 Found columns in your file: {', '.join([str(c) for c in import_df.columns[:10]])}")
+            else:
+                # Rename columns to standard format (case-insensitive)
+                rename_dict = {}
+                for std_col in ['Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+                               'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+                               'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                               'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+                               'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title']:
+                    std_col_lower = std_col.lower()
+                    if std_col_lower in column_mapping:
+                        original_col = column_mapping[std_col_lower]
+                        if original_col != std_col:
+                            rename_dict[original_col] = std_col
+                
+                if rename_dict:
+                    import_df = import_df.rename(columns=rename_dict)
+                # Add missing columns with empty values
+                template_columns = [
+                    'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+                    'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+                    'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                    'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+                    'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
+                ]
+                
+                missing_columns = [col for col in template_columns if col not in import_df.columns]
+                if missing_columns:
+                    for col in missing_columns:
+                        import_df[col] = ''
+                
+                # Ensure datetime columns are properly formatted
+                if 'Meeting Date' in import_df.columns:
+                    import_df['Meeting Date'] = pd.to_datetime(import_df['Meeting Date'], errors='coerce')
+                if 'Follow up Date' in import_df.columns:
+                    import_df['Follow up Date'] = pd.to_datetime(import_df['Follow up Date'], errors='coerce')
+                
+                # Show preview
+                st.markdown("**📋 Preview of Uploaded Data:**")
+                st.dataframe(import_df.head(10), use_container_width=True, hide_index=True)
+                st.caption(f"Total rows to import: {len(import_df)}")
+                
+                # Import mode is now fixed to "Update & Add New"
+                import_mode = "Update & Add New"
+                overwrite_status = False
+                
+                # Normalize empty values to null
+                for idx, row in import_df.iterrows():
+                    meeting_title = row.get('Meeting Title', '')
+                    has_meeting_title = (
+                        pd.notna(meeting_title) and 
+                        str(meeting_title).strip() != '' and 
+                        str(meeting_title).strip().lower() not in ['nan', 'none', 'null', '']
+                    )
+                    
+                    if has_meeting_title:
+                        meeting_date = row.get('Meeting Date', '')
+                        is_date_empty = True
+                        if pd.notna(meeting_date):
+                            if isinstance(meeting_date, (pd.Timestamp, datetime)):
+                                if isinstance(meeting_date, pd.Timestamp) and pd.isna(meeting_date):
+                                    is_date_empty = True
+                                else:
+                                    is_date_empty = False
+                            elif isinstance(meeting_date, str):
+                                date_str = meeting_date.strip()
+                                if date_str and date_str.lower() not in ['nan', 'none', 'null', '', 'nat']:
+                                    try:
+                                        parsed_date = pd.to_datetime(date_str)
+                                        if pd.notna(parsed_date):
+                                            is_date_empty = False
+                                    except:
+                                        pass
+                            else:
+                                date_str = str(meeting_date).strip()
+                                if date_str and date_str.lower() not in ['nan', 'none', 'null', '', 'nat']:
+                                    try:
+                                        parsed_date = pd.to_datetime(date_str)
+                                        if pd.notna(parsed_date):
+                                            is_date_empty = False
+                                    except:
+                                        pass
+                        
+                        if is_date_empty:
+                            import_df.at[idx, 'Meeting Date'] = pd.NaT
+                        
+                        start_time = row.get('Start Time', '')
+                        is_time_empty = True
+                        if pd.notna(start_time):
+                            time_str = str(start_time).strip()
+                            if time_str and time_str.lower() not in ['nan', 'none', 'null', '']:
+                                is_time_empty = False
+                        
+                        if is_time_empty:
+                            import_df.at[idx, 'Start Time'] = ''
+                
+                # Proceed with import
+                if st.button("✅ Import Data", type="primary", use_container_width=True, key="import_btn_top"):
+                    try:
+                        # Ensure all template columns exist
+                        template_columns = [
+                            'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
+                            'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
+                            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                            'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
+                            'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
+                        ]
+                        for col in template_columns:
+                            if col not in import_df.columns:
+                                import_df[col] = ''
+                        
+                        # Fill NaN values with empty strings for text columns
+                        text_columns = ['Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name', 'Purpose', 
+                                      'Agenda', 'Start Time', 'Time Zone', 'Meeting Type', 'Meeting Link', 
+                                      'Location', 'Status', 'Priority', 'Attendees', 'Internal External Guests', 'Notes', 
+                                      'Next Action', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title']
+                        for col in text_columns:
+                            if col in import_df.columns:
+                                import_df[col] = import_df[col].fillna('').astype(str)
+                        
+                        # Handle Status
+                        if 'Status' not in import_df.columns:
+                            import_df['Status'] = ''
+                        
+                        # Calculate status only for rows with Meeting Date and Start Time
+                        for idx, row in import_df.iterrows():
+                            if pd.isna(row.get('Status')) or str(row.get('Status', '')).strip() == '':
+                                has_date = pd.notna(row.get('Meeting Date')) and str(row.get('Meeting Date', '')).strip() != ''
+                                has_time = pd.notna(row.get('Start Time')) and str(row.get('Start Time', '')).strip() != ''
+                                if has_date and has_time:
+                                    import_df.at[idx, 'Status'] = calculate_status(row)
+                                else:
+                                    import_df.at[idx, 'Status'] = ''
+                        
+                        # Get current dataframe
+                        current_df = st.session_state.meetings_df.copy()
+                        
+                        # Clean up Meeting ID column
+                        if 'Meeting ID' in import_df.columns:
+                            import_df['Meeting ID'] = import_df['Meeting ID'].replace('', pd.NA)
+                            import_df['Meeting ID'] = import_df['Meeting ID'].replace(' ', pd.NA)
+                        
+                        if current_df.empty:
+                            if 'Meeting ID' not in import_df.columns or import_df['Meeting ID'].isna().all():
+                                import_df['Meeting ID'] = range(1, len(import_df) + 1)
+                            else:
+                                missing_mask = import_df['Meeting ID'].isna()
+                                if missing_mask.any():
+                                    max_id = pd.to_numeric(import_df['Meeting ID'], errors='coerce').max()
+                                    if pd.isna(max_id):
+                                        max_id = 0
+                                    next_id = int(max_id) + 1
+                                    import_df.loc[missing_mask, 'Meeting ID'] = range(next_id, next_id + missing_mask.sum())
+                            st.session_state.meetings_df = import_df.copy()
+                            added_count = len(import_df)
+                            updated_count = 0
+                        else:
+                            if 'Meeting ID' not in import_df.columns or import_df['Meeting ID'].isna().all():
+                                if 'Meeting ID' in current_df.columns:
+                                    max_id = pd.to_numeric(current_df['Meeting ID'], errors='coerce').max()
+                                    if pd.isna(max_id):
+                                        max_id = 0
+                                else:
+                                    max_id = 0
+                                import_df['Meeting ID'] = range(int(max_id) + 1, int(max_id) + 1 + len(import_df))
+                            else:
+                                missing_mask = import_df['Meeting ID'].isna()
+                                if missing_mask.any():
+                                    max_current = pd.to_numeric(current_df['Meeting ID'], errors='coerce').max() if 'Meeting ID' in current_df.columns else 0
+                                    max_import = pd.to_numeric(import_df['Meeting ID'], errors='coerce').max()
+                                    max_id = max(max_current if not pd.isna(max_current) else 0, max_import if not pd.isna(max_import) else 0)
+                                    next_id = int(max_id) + 1
+                                    import_df.loc[missing_mask, 'Meeting ID'] = range(next_id, next_id + missing_mask.sum())
+                            
+                            import_df['Meeting ID'] = pd.to_numeric(import_df['Meeting ID'], errors='coerce')
+                            if 'Meeting ID' in current_df.columns:
+                                current_df['Meeting ID'] = pd.to_numeric(current_df['Meeting ID'], errors='coerce')
+                            
+                            added_count = 0
+                            updated_count = 0
+                            
+                            if 'Meeting ID' in current_df.columns and 'Meeting ID' in import_df.columns:
+                                existing_ids = set(pd.to_numeric(current_df['Meeting ID'], errors='coerce').dropna().astype(int))
+                                import_df_ids = pd.to_numeric(import_df['Meeting ID'], errors='coerce')
+                                mask_update = import_df_ids.isin(existing_ids) & import_df_ids.notna()
+                                mask_add = ~mask_update
+                                to_update = import_df[mask_update].copy()
+                                to_add = import_df[mask_add].copy()
+                            else:
+                                to_update = pd.DataFrame()
+                                to_add = import_df.copy()
+                            
+                            # Update existing
+                            if not to_update.empty:
+                                for _, row in to_update.iterrows():
+                                    meeting_id = pd.to_numeric(row.get('Meeting ID'), errors='coerce')
+                                    if pd.notna(meeting_id) and 'Meeting ID' in current_df.columns:
+                                        idx = current_df[pd.to_numeric(current_df['Meeting ID'], errors='coerce') == meeting_id].index[0]
+                                        for col in current_df.columns:
+                                            if col in row and col != 'Status':
+                                                current_df.at[idx, col] = row[col]
+                                            elif col == 'Status':
+                                                if overwrite_status:
+                                                    current_df.at[idx, col] = row.get('Status', calculate_status(row))
+                                        if overwrite_status or pd.isna(row.get('Status')):
+                                            current_df.at[idx, 'Status'] = calculate_status(current_df.iloc[idx])
+                                updated_count = len(to_update)
+                            
+                            # Add new
+                            if not to_add.empty:
+                                to_add['Status'] = to_add.apply(calculate_status, axis=1)
+                                current_df = pd.concat([current_df, to_add], ignore_index=True)
+                                added_count = len(to_add)
+                            
+                            st.session_state.meetings_df = current_df
+                        
+                        # Save to database and Excel
+                        if save_meetings(st.session_state.meetings_df):
+                            success_msg = "✅ Import completed successfully!"
+                            if added_count > 0:
+                                success_msg += f" Added {added_count} new meeting(s)."
+                            if updated_count > 0:
+                                success_msg += f" Updated {updated_count} existing meeting(s)."
+                            st.success(success_msg)
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Failed to save imported data.")
+                    
+                    except Exception as e:
+                        st.error(f"Error during import: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+        
+        except Exception as e:
+            st.error(f"Error reading file: {str(e)}")
+            st.info("Please ensure the file is a valid Excel file (.xlsx or .xls format)")
     
     # Summary metrics
     st.markdown("---")
@@ -1544,413 +2836,192 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                           'Priority', 'Attendees', 'Location', 'Meeting Link']
         available_columns = [col for col in display_columns if col in display_df.columns]
         
-        st.dataframe(
-            display_df[available_columns],
-            use_container_width=True,
-            hide_index=True,
-            height=400
-        )
+        # Define column widths based on content importance and typical size
+        # Increased widths to prevent text stacking
+        column_width_map = {
+            'Meeting Title': 2.5,      # Wider - important and can be long
+            'Meeting Date': 1.0,       # Medium - dates are standard width
+            'Start Time': 0.8,         # Narrow - time format is short
+            'Status': 0.9,             # Medium - status values are short
+            'Meeting Type': 1.0,       # Medium - "Virtual" or "In Person"
+            'Organization': 1.8,       # Wider - can vary in length significantly
+            'Client': 1.5,             # Medium-wide - can vary in length
+            'Stakeholder Name': 2.0,   # Wider - names can be long
+            'Priority': 0.7,           # Narrow - "High", "Medium", "Low"
+            'Attendees': 1.2,          # Medium - can be empty or long
+            'Location': 1.2,           # Medium - can be empty or long
+            'Meeting Link': 1.5        # Medium-wide - URLs can be long
+        }
+        
+        # Create width list based on available columns
+        col_widths = [0.3]  # Select checkbox column - increased to prevent overlap
+        for col in available_columns:
+            col_widths.append(column_width_map.get(col, 1.0))  # Default to 1.0 if not in map
+        col_widths.extend([0.35, 0.35])  # Edit and Delete button columns
+        
+        # Multi-select and delete section
+        col_select1, col_select2 = st.columns([3, 1])
+        with col_select1:
+            select_all = st.checkbox("Select All", key="select_all_meetings", help="Select/deselect all meetings")
+            if select_all:
+                # Select all meeting IDs
+                if 'Meeting ID' in filtered_meetings.columns:
+                    st.session_state.selected_meetings = set(
+                        int(meeting_id) for meeting_id in filtered_meetings['Meeting ID'].dropna() 
+                        if pd.notna(meeting_id)
+                    )
+            else:
+                # Clear selection if "Select All" is unchecked
+                if 'Meeting ID' in filtered_meetings.columns:
+                    filtered_ids = set(
+                        int(meeting_id) for meeting_id in filtered_meetings['Meeting ID'].dropna() 
+                        if pd.notna(meeting_id)
+                    )
+                    # Only clear if all filtered meetings were selected
+                    if st.session_state.selected_meetings == filtered_ids:
+                        st.session_state.selected_meetings = set()
+        
+        with col_select2:
+            if st.session_state.selected_meetings:
+                if st.button("🗑️ Delete Selected", type="primary", use_container_width=True, 
+                           help=f"Delete {len(st.session_state.selected_meetings)} selected meeting(s)"):
+                    # Delete selected meetings
+                    deleted_count = 0
+                    failed_count = 0
+                    ids_to_delete = list(st.session_state.selected_meetings.copy())
+                    
+                    for meeting_id_int in ids_to_delete:
+                        try:
+                            delete_success = True
+                            
+                            # Delete from Supabase first
+                            if get_use_supabase() and init_db_pool():
+                                delete_success = delete_meeting_from_supabase(meeting_id_int)
+                            
+                            # Only delete from dataframe if database delete succeeded
+                            if delete_success:
+                                # Delete from dataframe
+                                if 'Meeting ID' in st.session_state.meetings_df.columns:
+                                    st.session_state.meetings_df = st.session_state.meetings_df[
+                                        st.session_state.meetings_df['Meeting ID'] != meeting_id_int
+                                    ]
+                                # Remove from selected set
+                                st.session_state.selected_meetings.discard(meeting_id_int)
+                                deleted_count += 1
+                            else:
+                                failed_count += 1
+                        except Exception as e:
+                            failed_count += 1
+                            st.session_state.selected_meetings.discard(meeting_id_int)
+                    
+                    # Save updated dataframe
+                    if deleted_count > 0:
+                        save_meetings(st.session_state.meetings_df)
+                        if failed_count == 0:
+                            st.success(f"{deleted_count} Meeting(s) Deleted Successfully")
+                        else:
+                            st.warning(f"{deleted_count} Meeting(s) Deleted Successfully, {failed_count} Failed")
+                        st.rerun()
+                    elif failed_count > 0:
+                        st.error(f"Failed to delete {failed_count} meeting(s)")
+        
+        # Create a custom table with Edit and Delete buttons (optimized column widths)
+        header_cols = st.columns(col_widths)
+        
+        # Display header with smaller font - ensure full visibility and no overlap
+        header_cols[0].markdown("<div style='line-height: 1.4; white-space: nowrap;'><small><strong>Select</strong></small></div>", unsafe_allow_html=True)
+        for idx, col_name in enumerate(available_columns):
+            # Show full column name with proper wrapping - ensure no overlap
+            header_cols[idx + 1].markdown(
+                f"<div style='line-height: 1.4; word-wrap: break-word; white-space: normal; overflow: hidden;'><small><strong title='{col_name}'>{col_name}</strong></small></div>", 
+                unsafe_allow_html=True
+            )
+        header_cols[-2].markdown("<div style='line-height: 1.4; white-space: nowrap;'><small><strong>Edit</strong></small></div>", unsafe_allow_html=True)
+        header_cols[-1].markdown("<div style='line-height: 1.4; white-space: nowrap;'><small><strong>Delete</strong></small></div>", unsafe_allow_html=True)
+        
+        st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
+        
+        # Display each row with buttons
+        for pos, (idx, row) in enumerate(display_df.iterrows()):
+            row_cols = st.columns(col_widths)
+            
+            # Get meeting ID for this row (use position since display_df is a copy of filtered_meetings)
+            meeting_id = None
+            if 'Meeting ID' in filtered_meetings.columns and pos < len(filtered_meetings):
+                meeting_id = filtered_meetings.iloc[pos].get('Meeting ID')
+            
+            # Checkbox for selection
+            if meeting_id is not None and pd.notna(meeting_id):
+                meeting_id_int = int(meeting_id)
+                is_selected = meeting_id_int in st.session_state.selected_meetings
+                checkbox_key = f"select_checkbox_{meeting_id_int}_{idx}"
+                
+                # Use checkbox and update selected_meetings based on its state
+                checkbox_state = row_cols[0].checkbox("", value=is_selected, key=checkbox_key, 
+                                                     label_visibility="collapsed", help="Select meeting")
+                
+                # Update selected_meetings set based on checkbox state
+                if checkbox_state:
+                    st.session_state.selected_meetings.add(meeting_id_int)
+                else:
+                    st.session_state.selected_meetings.discard(meeting_id_int)
+            
+            # Display row data with smaller font - prevent text stacking
+            for col_idx, col_name in enumerate(available_columns):
+                value = row.get(col_name, '')
+                if pd.isna(value):
+                    value = ''
+                # Truncate very long values to prevent excessive wrapping
+                value_str = str(value) if value else ''
+                if len(value_str) > 50 and col_name in ['Meeting Title', 'Organization', 'Stakeholder Name']:
+                    value_str = value_str[:47] + "..."
+                row_cols[col_idx + 1].markdown(
+                    f"<div style='line-height: 1.5; word-wrap: break-word; overflow-wrap: break-word; white-space: normal;'><small>{value_str}</small></div>", 
+                    unsafe_allow_html=True
+                )
+            
+            # Edit button - small button
+            if meeting_id is not None and pd.notna(meeting_id):
+                if row_cols[-2].button("✏️", key=f"edit_{meeting_id}_{idx}", use_container_width=False, help="Edit meeting"):
+                    st.session_state.current_page = "Edit/Update Meeting"
+                    st.session_state.edit_meeting_id = int(meeting_id)
+                    st.rerun()
+            
+            # Delete button - small button
+            if meeting_id is not None and pd.notna(meeting_id):
+                if row_cols[-1].button("🗑️", key=f"delete_{meeting_id}_{idx}", use_container_width=False, type="secondary", help="Delete meeting"):
+                    try:
+                        meeting_id_int = int(meeting_id)
+                        delete_success = True
+                        
+                        # Delete from Supabase first
+                        if get_use_supabase() and init_db_pool():
+                            delete_success = delete_meeting_from_supabase(meeting_id_int)
+                        
+                        # Only delete from dataframe if database delete succeeded
+                        if delete_success:
+                            # Delete from dataframe
+                            if 'Meeting ID' in st.session_state.meetings_df.columns:
+                                st.session_state.meetings_df = st.session_state.meetings_df[
+                                    st.session_state.meetings_df['Meeting ID'] != meeting_id_int
+                                ]
+                            
+                            # Save updated dataframe
+                            save_meetings(st.session_state.meetings_df)
+                            st.success("Meeting Deleted Successfully")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Failed to delete meeting {meeting_id_int} from database. Please try again.")
+                    except Exception as e:
+                        st.error(f"Error deleting meeting: {e}")
+            
+            st.markdown("<hr style='margin: 0.3rem 0;'>", unsafe_allow_html=True)
         
         st.caption(f"Showing {len(display_df)} meeting(s)")
     else:
         st.info("📭 No meetings found matching your filters.")
     
-    # Import/Upload section
-    st.markdown("---")
-    st.markdown("""
-    <div style="background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
-                padding: 1.5rem;
-                border-radius: 12px;
-                margin-bottom: 1.5rem;
-                border-left: 4px solid #f59e0b;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);">
-        <h2 style="margin: 0; color: #1e293b; font-size: 1.5rem; font-weight: 600;">📤 Import/Update from Excel</h2>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Template download option
-    col_template1, col_template2 = st.columns([3, 1])
-    with col_template1:
-        st.write("Upload an Excel file to import or update meeting records.")
-    with col_template2:
-        # Create template dataframe with all template columns
-        template_columns = [
-            'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
-            'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
-            'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
-            'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
-        ]
-        template_df = pd.DataFrame(columns=template_columns)
-        # Add sample row
-        template_df = pd.concat([template_df, pd.DataFrame([{
-            'Meeting ID': 1,
-            'Meeting Title': 'Sample Meeting',
-            'Organization': 'Sample Org',
-            'Client': 'Sample Client',
-            'Stakeholder Name': 'Jane Smith',
-            'Purpose': 'Sample Purpose',
-            'Agenda': 'Sample agenda items',
-            'Meeting Date': datetime.now().date(),
-            'Start Time': datetime.now().time().strftime('%H:%M:%S'),
-            'Time Zone': 'UTC',
-            'Meeting Type': 'Virtual',
-            'Meeting Link': 'https://meet.example.com',
-            'Location': '',
-            'Status': 'Upcoming',
-            'Priority': 'Medium',
-            'Attendees': 'Team Member 1, Team Member 2',
-            'Internal External Guests': 'Client A, Client B',
-            'Notes': 'Sample notes',
-            'Next Action': 'Follow up required',
-            'Follow up Date': '',
-            'Reminder Sent': 'No',
-            'Calendar Sync': 'No',
-            'Calendar Event Title': 'Sample Meeting'
-        }])], ignore_index=True)
-        
-        # Save template to bytes
-        import io
-        template_buffer = io.BytesIO()
-        template_df.to_excel(template_buffer, index=False)
-        template_buffer.seek(0)
-        
-        st.download_button(
-            label="📥 Download Template",
-            data=template_buffer,
-            file_name="meeting_import_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Download a template Excel file with the correct column format"
-        )
-    
-    uploaded_file = st.file_uploader(
-        "Choose an Excel file to import",
-        type=['xlsx', 'xls'],
-        help="Upload an Excel file with meeting data. Required columns: Meeting Title, Meeting Date, Start Time. All other columns are optional."
-    )
-    
-    if uploaded_file is not None:
-        try:
-            # Read the uploaded file
-            import_df = pd.read_excel(uploaded_file)
-            
-            # Check only critical required columns
-            critical_required_columns = ['Meeting Title']
-            missing_critical = [col for col in critical_required_columns if col not in import_df.columns]
-            
-            if missing_critical:
-                st.error(f"❌ Missing critical required column: {', '.join(missing_critical)}")
-                st.info("At minimum, 'Meeting Title' column is required. Other missing columns will be filled with empty values.")
-            else:
-                # Add missing columns with empty values
-                template_columns = [
-                    'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
-                    'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                    'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
-                    'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
-                    'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
-                ]
-                
-                missing_columns = [col for col in template_columns if col not in import_df.columns]
-                if missing_columns:
-                    # Add missing columns silently without showing message
-                    for col in missing_columns:
-                        import_df[col] = ''
-                
-                # Ensure datetime columns are properly formatted
-                if 'Meeting Date' in import_df.columns:
-                    import_df['Meeting Date'] = pd.to_datetime(import_df['Meeting Date'], errors='coerce')
-                if 'Follow up Date' in import_df.columns:
-                    import_df['Follow up Date'] = pd.to_datetime(import_df['Follow up Date'], errors='coerce')
-                
-                # Show preview
-                st.markdown("**📋 Preview of Uploaded Data:**")
-                st.dataframe(import_df.head(10), use_container_width=True, hide_index=True)
-                st.caption(f"Total rows to import: {len(import_df)}")
-                
-                # Import options
-                col1, col2 = st.columns(2)
-                with col1:
-                    import_mode = st.radio(
-                        "Import Mode:",
-                        ["Add New Only", "Update Existing", "Update & Add New"],
-                        help="Add New: Only import records with new meeting_id\nUpdate Existing: Only update records with matching meeting_id\nUpdate & Add New: Do both"
-                    )
-                
-                with col2:
-                    overwrite_status = st.checkbox(
-                        "Overwrite existing status",
-                        value=False,
-                        help="If checked, will overwrite status of existing meetings. If unchecked, will preserve current status for existing meetings."
-                    )
-                
-                # Normalize empty values to null - only process rows that have a Meeting Title
-                # Rows without Meeting Title are treated as empty and will be imported as-is
-                for idx, row in import_df.iterrows():
-                    # Check if row has a Meeting Title - only process rows with Meeting Title
-                    meeting_title = row.get('Meeting Title', '')
-                    has_meeting_title = (
-                        pd.notna(meeting_title) and 
-                        str(meeting_title).strip() != '' and 
-                        str(meeting_title).strip().lower() not in ['nan', 'none', 'null', '']
-                    )
-                    
-                    # Only normalize empty fields if row has a Meeting Title
-                    # Rows without Meeting Title are treated as empty and allowed through
-                    if has_meeting_title:
-                        meeting_date = row.get('Meeting Date', '')
-                        # Check if date is empty - handle various formats including NaT
-                        is_date_empty = True
-                        if pd.notna(meeting_date):
-                            if isinstance(meeting_date, (pd.Timestamp, datetime)):
-                                # Check if it's a valid timestamp (not NaT)
-                                if isinstance(meeting_date, pd.Timestamp) and pd.isna(meeting_date):
-                                    is_date_empty = True
-                                else:
-                                    is_date_empty = False
-                            elif isinstance(meeting_date, str):
-                                date_str = meeting_date.strip()
-                                if date_str and date_str.lower() not in ['nan', 'none', 'null', '', 'nat']:
-                                    # Try to parse it
-                                    try:
-                                        parsed_date = pd.to_datetime(date_str)
-                                        if pd.notna(parsed_date):
-                                            is_date_empty = False
-                                    except:
-                                        pass
-                            else:
-                                # Try to convert to string and check
-                                date_str = str(meeting_date).strip()
-                                if date_str and date_str.lower() not in ['nan', 'none', 'null', '', 'nat']:
-                                    try:
-                                        parsed_date = pd.to_datetime(date_str)
-                                        if pd.notna(parsed_date):
-                                            is_date_empty = False
-                                    except:
-                                        pass
-                        
-                        # Set missing Meeting Date to null (NaT)
-                        if is_date_empty:
-                            import_df.at[idx, 'Meeting Date'] = pd.NaT
-                        
-                        start_time = row.get('Start Time', '')
-                        # Check if time is empty
-                        is_time_empty = True
-                        if pd.notna(start_time):
-                            time_str = str(start_time).strip()
-                            if time_str and time_str.lower() not in ['nan', 'none', 'null', '']:
-                                is_time_empty = False
-                        
-                        # Set missing Start Time to null (empty string)
-                        if is_time_empty:
-                            import_df.at[idx, 'Start Time'] = ''
-                    # If row has no Meeting Title, skip processing (treat as empty row)
-                
-                # Validate required fields
-                validation_errors = []
-                for idx, row in import_df.iterrows():
-                    # Only validate rows that have a Meeting Title
-                    meeting_title = row.get('Meeting Title', '')
-                    has_meeting_title = (
-                        pd.notna(meeting_title) and 
-                        str(meeting_title).strip() != '' and 
-                        str(meeting_title).strip().lower() not in ['nan', 'none', 'null', '']
-                    )
-                    
-                    # Note: Stakeholder Name, Attendees, and Internal External Guests are allowed to be empty/null
-                    # They will be filled with empty strings during import
-                
-                # Show info if there are validation warnings (but don't block import)
-                if validation_errors:
-                    st.warning("⚠️ **Data Quality Warnings (import will proceed):**")
-                    for error in validation_errors[:5]:  # Show first 5 warnings
-                        st.write(f"- {error}")
-                    if len(validation_errors) > 5:
-                        st.write(f"- ... and {len(validation_errors) - 5} more warnings")
-                    st.info("💡 Missing values will be filled with empty strings. You can update them later.")
-                
-                # Always proceed with import (validation_errors are just warnings now)
-                # Proceed with import
-                if st.button("✅ Import Data", type="primary", use_container_width=True):
-                    try:
-                            # Ensure all template columns exist in import_df (already done above, but double-check)
-                            template_columns = [
-                                'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
-                                'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                                'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
-                                'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
-                                'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
-                            ]
-                            for col in template_columns:
-                                if col not in import_df.columns:
-                                    import_df[col] = ''
-                            
-                            # Fill NaN values with empty strings for text columns
-                            text_columns = ['Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name', 'Purpose', 
-                                          'Agenda', 'Start Time', 'Time Zone', 'Meeting Type', 'Meeting Link', 
-                                          'Location', 'Status', 'Priority', 'Attendees', 'Internal External Guests', 'Notes', 
-                                          'Next Action', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title']
-                            for col in text_columns:
-                                if col in import_df.columns:
-                                    import_df[col] = import_df[col].fillna('').astype(str)
-                            # For date columns, keep NaT for missing dates (already handled above)
-                            
-                            # Handle Status - only calculate for rows with data, set to empty for empty rows
-                            if 'Status' not in import_df.columns:
-                                import_df['Status'] = ''
-                            
-                            # Calculate status only for rows with Meeting Date and Start Time
-                            for idx, row in import_df.iterrows():
-                                if pd.isna(row.get('Status')) or str(row.get('Status', '')).strip() == '':
-                                    # Check if row has date and time
-                                    has_date = pd.notna(row.get('Meeting Date')) and str(row.get('Meeting Date', '')).strip() != ''
-                                    has_time = pd.notna(row.get('Start Time')) and str(row.get('Start Time', '')).strip() != ''
-                                    if has_date and has_time:
-                                        import_df.at[idx, 'Status'] = calculate_status(row)
-                                    else:
-                                        import_df.at[idx, 'Status'] = ''
-                            
-                            # Get current dataframe
-                            current_df = st.session_state.meetings_df.copy()
-                            
-                            if current_df.empty:
-                                # If no existing data, just add all
-                                if 'Meeting ID' not in import_df.columns or import_df['Meeting ID'].isna().all():
-                                    # Generate meeting IDs
-                                    import_df['Meeting ID'] = range(1, len(import_df) + 1)
-                                st.session_state.meetings_df = import_df.copy()
-                                added_count = len(import_df)
-                                updated_count = 0
-                            else:
-                                # Handle Meeting ID
-                                if 'Meeting ID' not in import_df.columns or import_df['Meeting ID'].isna().all():
-                                    # Generate new IDs for records without IDs
-                                    if 'Meeting ID' in current_df.columns:
-                                        max_id = pd.to_numeric(current_df['Meeting ID'], errors='coerce').max()
-                                        if pd.isna(max_id):
-                                            max_id = 0
-                                    else:
-                                        max_id = 0
-                                    import_df['Meeting ID'] = range(int(max_id) + 1, int(max_id) + 1 + len(import_df))
-                                
-                                # Convert Meeting ID for comparison
-                                import_df['Meeting ID'] = pd.to_numeric(import_df['Meeting ID'], errors='coerce')
-                                if 'Meeting ID' in current_df.columns:
-                                    current_df['Meeting ID'] = pd.to_numeric(current_df['Meeting ID'], errors='coerce')
-                                
-                                added_count = 0
-                                updated_count = 0
-                                
-                                if import_mode == "Add New Only":
-                                    # Only add records with new Meeting IDs
-                                    if 'Meeting ID' in current_df.columns:
-                                        existing_ids = set(pd.to_numeric(current_df['Meeting ID'], errors='coerce').dropna().astype(int))
-                                    else:
-                                        existing_ids = set()
-                                    if 'Meeting ID' in import_df.columns:
-                                        # Create boolean mask with same index as import_df
-                                        import_df_ids = pd.to_numeric(import_df['Meeting ID'], errors='coerce')
-                                        mask = ~import_df_ids.isin(existing_ids) | import_df_ids.isna()
-                                        new_records = import_df[mask].copy()
-                                    else:
-                                        new_records = import_df.copy()
-                                    if not new_records.empty:
-                                        # Recalculate status for new records
-                                        new_records['Status'] = new_records.apply(calculate_status, axis=1)
-                                        st.session_state.meetings_df = pd.concat([current_df, new_records], ignore_index=True)
-                                        added_count = len(new_records)
-                                
-                                elif import_mode == "Update Existing":
-                                    # Only update existing records
-                                    if 'Meeting ID' in current_df.columns and 'Meeting ID' in import_df.columns:
-                                        existing_ids = set(pd.to_numeric(current_df['Meeting ID'], errors='coerce').dropna().astype(int))
-                                        # Create boolean mask with same index as import_df
-                                        import_df_ids = pd.to_numeric(import_df['Meeting ID'], errors='coerce')
-                                        mask = import_df_ids.isin(existing_ids) & import_df_ids.notna()
-                                        to_update = import_df[mask].copy()
-                                    else:
-                                        to_update = pd.DataFrame()
-                                    if not to_update.empty:
-                                        for _, row in to_update.iterrows():
-                                            meeting_id = pd.to_numeric(row.get('Meeting ID'), errors='coerce')
-                                            if pd.notna(meeting_id) and 'Meeting ID' in current_df.columns:
-                                                idx = current_df[pd.to_numeric(current_df['Meeting ID'], errors='coerce') == meeting_id].index[0]
-                                                # Update all fields
-                                                for col in current_df.columns:
-                                                    if col in row and col != 'Status':
-                                                        current_df.at[idx, col] = row[col]
-                                                    elif col == 'Status':
-                                                        if overwrite_status:
-                                                            current_df.at[idx, col] = row.get('Status', calculate_status(row))
-                                                # Recalculate status if overwrite is enabled or status is missing
-                                                if overwrite_status or pd.isna(row.get('Status')):
-                                                    current_df.at[idx, 'Status'] = calculate_status(current_df.iloc[idx])
-                                        st.session_state.meetings_df = current_df
-                                        updated_count = len(to_update)
-                                    else:
-                                        st.warning("No records with matching Meeting ID found to update.")
-                                        st.session_state.meetings_df = current_df
-                                
-                                else:  # Update & Add New
-                                    if 'Meeting ID' in current_df.columns and 'Meeting ID' in import_df.columns:
-                                        existing_ids = set(pd.to_numeric(current_df['Meeting ID'], errors='coerce').dropna().astype(int))
-                                        # Create boolean mask with same index as import_df
-                                        import_df_ids = pd.to_numeric(import_df['Meeting ID'], errors='coerce')
-                                        mask_update = import_df_ids.isin(existing_ids) & import_df_ids.notna()
-                                        mask_add = ~mask_update
-                                        to_update = import_df[mask_update].copy()
-                                        to_add = import_df[mask_add].copy()
-                                    else:
-                                        to_update = pd.DataFrame()
-                                        to_add = import_df.copy()
-                                    
-                                    # Update existing
-                                    if not to_update.empty:
-                                        for _, row in to_update.iterrows():
-                                            meeting_id = pd.to_numeric(row.get('Meeting ID'), errors='coerce')
-                                            if pd.notna(meeting_id) and 'Meeting ID' in current_df.columns:
-                                                idx = current_df[pd.to_numeric(current_df['Meeting ID'], errors='coerce') == meeting_id].index[0]
-                                                for col in current_df.columns:
-                                                    if col in row and col != 'Status':
-                                                        current_df.at[idx, col] = row[col]
-                                                    elif col == 'Status':
-                                                        if overwrite_status:
-                                                            current_df.at[idx, col] = row.get('Status', calculate_status(row))
-                                                if overwrite_status or pd.isna(row.get('Status')):
-                                                    current_df.at[idx, 'Status'] = calculate_status(current_df.iloc[idx])
-                                        updated_count = len(to_update)
-                                    
-                                    # Add new
-                                    if not to_add.empty:
-                                        to_add['Status'] = to_add.apply(calculate_status, axis=1)
-                                        current_df = pd.concat([current_df, to_add], ignore_index=True)
-                                        added_count = len(to_add)
-                                    
-                                    st.session_state.meetings_df = current_df
-                            
-                            # Save to Excel
-                            if save_meetings(st.session_state.meetings_df):
-                                success_msg = "✅ Import completed successfully!"
-                                if added_count > 0:
-                                    success_msg += f" Added {added_count} new meeting(s)."
-                                if updated_count > 0:
-                                    success_msg += f" Updated {updated_count} existing meeting(s)."
-                                st.success(success_msg)
-                                time.sleep(1)
-                                st.rerun()
-                            else:
-                                st.error("Failed to save imported data.")
-                    
-                    except Exception as e:
-                            st.error(f"Error during import: {str(e)}")
-                            import traceback
-                            st.code(traceback.format_exc())
-        
-        except Exception as e:
-            st.error(f"Error reading file: {str(e)}")
-            st.info("Please ensure the file is a valid Excel file (.xlsx or .xls format)")
-    
-    # Export section
+    # Export section (Import section moved to top after filters)
     st.markdown("---")
     st.markdown("""
     <div style="background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
@@ -1964,9 +3035,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
     """, unsafe_allow_html=True)
     
     if not st.session_state.meetings_df.empty:
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            if st.button("📥 Export to Excel", type="primary", use_container_width=True):
+        if st.button("📥 Export to Excel", type="primary", use_container_width=True):
                 export_filename = f"meeting_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                 try:
                     st.session_state.meetings_df.to_excel(export_filename, index=False)
@@ -1985,4 +3054,691 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                     st.error(f"Error exporting data: {e}")
     else:
         st.info("📭 No data available to export. Add meetings first.")
+
+# ============================================================================
+# PODCAST MEETING PAGES
+# ============================================================================
+
+# PAGE 4: Add New Podcast Meeting
+elif st.session_state.current_page == "Add New Podcast Meeting":
+    with st.form("add_podcast_meeting_form", clear_on_submit=True):
+        st.markdown("### 📝 Basic Information")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            name = st.text_input("Name *", value="", placeholder="Enter guest/speaker name", help="Enter the name of the guest/speaker (Required)")
+            designation = st.text_input("Designation", value="", placeholder="Enter job title or designation", help="Enter the job title or designation of the guest")
+            organization = st.text_input("Organization", value="", placeholder="Enter organization name", help="Enter the organization the guest belongs to")
+            linkedin_url = st.text_input("LinkedIn URL", value="", placeholder="Enter LinkedIn profile URL", help="Enter the LinkedIn profile URL of the guest")
+        
+        with col2:
+            host = st.text_input("Host", value="", placeholder="Enter podcast host name", help="Enter the name of the podcast host")
+            status = st.selectbox("Status", ["Upcoming", "Completed", "Cancelled"], index=0)
+            contacted_through = st.text_input("Contacted Through (Platform)", value="", placeholder="e.g., LinkedIn, Email, etc.", help="Enter the platform used to contact the guest")
+        
+        st.markdown("### 🕐 Date & Time")
+        col_date1, col_date2, col_date3 = st.columns(3)
+        with col_date1:
+            date = st.date_input("Date", value=None)
+        with col_date2:
+            day = st.text_input("Day", value="", placeholder="e.g., Monday, Tuesday")
+        with col_date3:
+            time_val = st.time_input("Time", value=None)
+        
+        st.markdown("### 💬 Comments")
+        comments = st.text_area("Comments", value="", height=100, placeholder="Enter additional notes or comments...", help="Enter any additional notes or comments about the podcast meeting")
+        
+        submitted = st.form_submit_button("💾 Save Podcast Meeting", type="primary", use_container_width=True)
+        
+        if submitted:
+            if not name.strip():
+                st.error("Name is required")
+            else:
+                new_podcast_meeting = pd.DataFrame([{
+                    'Podcast ID': get_next_podcast_id(st.session_state.podcast_meetings_df),
+                    'Name': name.strip(),
+                    'Designation': designation.strip() if designation else '',
+                    'Organization': organization.strip() if organization else '',
+                    'LinkedIn URL': linkedin_url.strip() if linkedin_url else '',
+                    'Host': host.strip() if host else '',
+                    'Date': date if date else pd.NaT,
+                    'Day': day.strip() if day else '',
+                    'Time': time_val.strftime('%H:%M:%S') if time_val else '',
+                    'Status': status,
+                    'Contacted Through': contacted_through.strip() if contacted_through else '',
+                    'Comments': comments.strip() if comments else ''
+                }])
+                
+                if st.session_state.podcast_meetings_df.empty:
+                    st.session_state.podcast_meetings_df = new_podcast_meeting
+                else:
+                    st.session_state.podcast_meetings_df = pd.concat([st.session_state.podcast_meetings_df, new_podcast_meeting], ignore_index=True)
+                
+                if save_podcast_meetings(st.session_state.podcast_meetings_df):
+                    st.success("✅ Podcast Meeting Saved Successfully!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to save podcast meeting. Please try again.")
+
+# PAGE 5: Edit/Update Podcast Meeting
+elif st.session_state.current_page == "Edit/Update Podcast Meeting":
+    if st.session_state.podcast_meetings_df.empty:
+        st.info("📭 No podcast meetings found. Please add a podcast meeting first.")
+    else:
+        podcast_meetings_list = []
+        meeting_index_map = {}
+        
+        for idx, row in st.session_state.podcast_meetings_df.iterrows():
+            podcast_id = row.get('Podcast ID', 'N/A')
+            name = row.get('Name', 'N/A')
+            date = row.get('Date', '')
+            if pd.notna(date):
+                try:
+                    date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
+                except:
+                    date_str = str(date)
+            else:
+                date_str = 'N/A'
+            label = f"ID: {podcast_id} - {name} ({date_str})"
+            podcast_meetings_list.append(label)
+            meeting_index_map[label] = idx
+        
+        if 'edit_podcast_meeting_id' in st.session_state:
+            selected_meeting_id = st.session_state.edit_podcast_meeting_id
+            mask = st.session_state.podcast_meetings_df['Podcast ID'] == selected_meeting_id
+            if mask.any():
+                selected_idx = st.session_state.podcast_meetings_df[mask].index[0]
+                selected_meeting = st.session_state.podcast_meetings_df.iloc[selected_idx]
+                selected_meeting_label = f"ID: {selected_meeting_id} - {selected_meeting.get('Name', 'N/A')} ({pd.to_datetime(selected_meeting.get('Date', '')).strftime('%Y-%m-%d') if pd.notna(selected_meeting.get('Date', '')) else 'N/A'})"
+                default_index = podcast_meetings_list.index(selected_meeting_label) if selected_meeting_label in podcast_meetings_list else 0
+                del st.session_state.edit_podcast_meeting_id
+            else:
+                default_index = 0
+        else:
+            default_index = 0
+        
+        selected_meeting_label = st.selectbox("Select Podcast Meeting to Edit:", podcast_meetings_list, index=default_index)
+        
+        if selected_meeting_label in meeting_index_map:
+            selected_idx = meeting_index_map[selected_meeting_label]
+            selected_meeting = st.session_state.podcast_meetings_df.iloc[selected_idx]
+            selected_podcast_id = selected_meeting.get('Podcast ID')
+            st.session_state.selected_podcast_meeting_index = selected_idx
+            
+            st.markdown("### 📋 Current Podcast Meeting Information")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**Podcast ID:** {selected_podcast_id}")
+                st.write(f"**Name:** {selected_meeting.get('Name', 'N/A')}")
+                if selected_meeting.get('Designation'):
+                    st.write(f"**Designation:** {selected_meeting.get('Designation', 'N/A')}")
+                if selected_meeting.get('Organization'):
+                    st.write(f"**Organization:** {selected_meeting.get('Organization', 'N/A')}")
+            with col2:
+                date_val = selected_meeting.get('Date', '')
+                if pd.notna(date_val):
+                    try:
+                        date_str = pd.to_datetime(date_val).strftime('%Y-%m-%d')
+                    except:
+                        date_str = str(date_val)
+                else:
+                    date_str = 'N/A'
+                st.write(f"**Date:** {date_str}")
+                st.write(f"**Time:** {selected_meeting.get('Time', 'N/A')}")
+                st.write(f"**Status:** {selected_meeting.get('Status', 'N/A')}")
+        
+            st.markdown("---")
+            with st.form("edit_podcast_meeting_form"):
+                st.markdown("### 📝 Basic Information")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    edit_name = st.text_input("Name *", value=str(selected_meeting.get('Name', '')), placeholder="Enter guest/speaker name", help="Enter the name of the guest/speaker (Required)")
+                    edit_designation = st.text_input("Designation", value=str(selected_meeting.get('Designation', '')), placeholder="Enter job title or designation")
+                    edit_organization = st.text_input("Organization", value=str(selected_meeting.get('Organization', '')), placeholder="Enter organization name")
+                    edit_linkedin_url = st.text_input("LinkedIn URL", value=str(selected_meeting.get('LinkedIn URL', '')), placeholder="Enter LinkedIn profile URL")
+                
+                with col2:
+                    edit_host = st.text_input("Host", value=str(selected_meeting.get('Host', '')), placeholder="Enter podcast host name")
+                    current_status = str(selected_meeting.get('Status', 'Upcoming'))
+                    edit_status = st.selectbox("Status", ["Upcoming", "Completed", "Cancelled"], index=["Upcoming", "Completed", "Cancelled"].index(current_status) if current_status in ["Upcoming", "Completed", "Cancelled"] else 0)
+                    edit_contacted_through = st.text_input("Contacted Through (Platform)", value=str(selected_meeting.get('Contacted Through', '')), placeholder="e.g., LinkedIn, Email, etc.")
+                
+                st.markdown("### 🕐 Date & Time")
+                col_date1, col_date2, col_date3 = st.columns(3)
+                
+                with col_date1:
+                    date_val = selected_meeting.get('Date', None)
+                    if pd.notna(date_val):
+                        try:
+                            edit_date = st.date_input("Date", value=pd.to_datetime(date_val).date())
+                        except:
+                            edit_date = st.date_input("Date", value=None)
+                    else:
+                        edit_date = st.date_input("Date", value=None)
+                
+                with col_date2:
+                    edit_day = st.text_input("Day", value=str(selected_meeting.get('Day', '')), placeholder="e.g., Monday, Tuesday")
+                
+                with col_date3:
+                    time_str = str(selected_meeting.get('Time', ''))
+                    try:
+                        if ':' in time_str and time_str.strip():
+                            time_parts = time_str.split(':')
+                            edit_time = st.time_input("Time", value=datetime.strptime(time_str[:5], '%H:%M').time() if len(time_parts) >= 2 else None)
+                        else:
+                            edit_time = st.time_input("Time", value=None)
+                    except:
+                        edit_time = st.time_input("Time", value=None)
+                
+                st.markdown("### 💬 Comments")
+                edit_comments = st.text_area("Comments", value=str(selected_meeting.get('Comments', '')), height=100)
+                
+                update_submitted = st.form_submit_button("💾 Update Podcast Meeting", type="primary", use_container_width=True)
+                
+                if update_submitted:
+                    if not edit_name.strip():
+                        st.error("Name is required")
+                    else:
+                        idx = st.session_state.selected_podcast_meeting_index
+                        st.session_state.podcast_meetings_df.at[idx, 'Name'] = edit_name.strip()
+                        st.session_state.podcast_meetings_df.at[idx, 'Designation'] = edit_designation.strip() if edit_designation else ''
+                        st.session_state.podcast_meetings_df.at[idx, 'Organization'] = edit_organization.strip() if edit_organization else ''
+                        st.session_state.podcast_meetings_df.at[idx, 'LinkedIn URL'] = edit_linkedin_url.strip() if edit_linkedin_url else ''
+                        st.session_state.podcast_meetings_df.at[idx, 'Host'] = edit_host.strip() if edit_host else ''
+                        st.session_state.podcast_meetings_df.at[idx, 'Date'] = edit_date if edit_date else pd.NaT
+                        st.session_state.podcast_meetings_df.at[idx, 'Day'] = edit_day.strip() if edit_day else ''
+                        st.session_state.podcast_meetings_df.at[idx, 'Time'] = edit_time.strftime('%H:%M:%S') if edit_time else ''
+                        st.session_state.podcast_meetings_df.at[idx, 'Status'] = edit_status
+                        st.session_state.podcast_meetings_df.at[idx, 'Contacted Through'] = edit_contacted_through.strip() if edit_contacted_through else ''
+                        st.session_state.podcast_meetings_df.at[idx, 'Comments'] = edit_comments.strip() if edit_comments else ''
+                        
+                        if save_podcast_meetings(st.session_state.podcast_meetings_df):
+                            st.success("✅ Podcast Meeting Updated Successfully!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to update podcast meeting. Please try again.")
+
+# PAGE 6: Podcast Meetings Summary & Export
+elif st.session_state.current_page == "Podcast Meetings Summary & Export":
+    if st.session_state.podcast_meetings_df.empty:
+        st.info("📭 No podcast meetings found. Please add a podcast meeting first.")
+    else:
+        st.markdown("### 🔍 Filters")
+        col_filter1, col_filter2, col_filter3 = st.columns(3)
+        
+        with col_filter1:
+            status_filter = st.multiselect("Filter by Status", options=["Upcoming", "Completed", "Cancelled"], default=[])
+        with col_filter2:
+            organization_filter = st.text_input("Filter by Organization", placeholder="Enter organization name")
+        with col_filter3:
+            host_filter = st.text_input("Filter by Host", placeholder="Enter host name")
+        
+        filtered_meetings = st.session_state.podcast_meetings_df.copy()
+        
+        if status_filter:
+            filtered_meetings = filtered_meetings[filtered_meetings['Status'].isin(status_filter)]
+        if organization_filter:
+            filtered_meetings = filtered_meetings[filtered_meetings['Organization'].astype(str).str.contains(organization_filter, case=False, na=False)]
+        if host_filter:
+            filtered_meetings = filtered_meetings[filtered_meetings['Host'].astype(str).str.contains(host_filter, case=False, na=False)]
+        
+        # Import/Upload section - moved to top for better visibility
+        st.markdown("---")
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+                    padding: 1.5rem;
+                    border-radius: 12px;
+                    margin-bottom: 1.5rem;
+                    border-left: 4px solid #f59e0b;
+                    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);">
+            <h2 style="margin: 0; color: #1e293b; font-size: 1.5rem; font-weight: 600;">📤 Import/Update from Excel</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Template download option
+        col_template1, col_template2 = st.columns([3, 1])
+        with col_template1:
+            st.write("Upload an Excel file to import or update podcast meeting records. Download the template below to ensure correct format.")
+        with col_template2:
+            # Create template dataframe with all template columns
+            template_columns = [
+                'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+            ]
+            template_df = pd.DataFrame(columns=template_columns)
+            # Add sample row
+            template_df = pd.concat([template_df, pd.DataFrame([{
+                'Podcast ID': 1,
+                'Name': 'Sample Guest',
+                'Designation': 'CEO',
+                'Organization': 'Sample Org',
+                'LinkedIn URL': 'https://linkedin.com/in/sample',
+                'Host': 'John Doe',
+                'Date': datetime.now().date(),
+                'Day': 'Monday',
+                'Time': datetime.now().time().strftime('%H:%M:%S'),
+                'Status': 'Upcoming',
+                'Contacted Through': 'LinkedIn',
+                'Comments': 'Sample comments'
+            }])], ignore_index=True)
+            
+            # Save template to bytes
+            import io
+            template_buffer = io.BytesIO()
+            template_df.to_excel(template_buffer, index=False)
+            template_buffer.seek(0)
+            
+            st.download_button(
+                label="📥 Download Template",
+                data=template_buffer,
+                file_name="podcast_meetings_import_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Download a template Excel file with the correct column format",
+                use_container_width=True
+            )
+        
+        uploaded_file = st.file_uploader(
+            "Choose an Excel file to import",
+            type=['xlsx', 'xls'],
+            help="Upload an Excel file with podcast meeting data. Required columns: Name. All other columns are optional.",
+            key="podcast_uploader"
+        )
+        
+        if uploaded_file is not None:
+            try:
+                # Read the uploaded file without header first to inspect
+                temp_df = pd.read_excel(uploaded_file, header=None)
+                
+                # Look for a row that contains "Name" (case-insensitive) - check first 10 rows
+                header_row = None
+                for idx in range(min(10, len(temp_df))):
+                    row_values = [str(val).strip() if pd.notna(val) else '' for val in temp_df.iloc[idx].values]
+                    row_lower = [val.lower() for val in row_values]
+                    # Check if this row contains "name" as a column header
+                    if any('name' in val and len(val) < 20 for val in row_lower):  # "name" should be a short word, not part of a long text
+                        header_row = idx
+                        break
+                
+                if header_row is not None:
+                    # Re-read with the correct header row
+                    import_df = pd.read_excel(uploaded_file, header=header_row)
+                else:
+                    # Try with header=0 first
+                    import_df = pd.read_excel(uploaded_file, header=0)
+                    # If we got "Unnamed" columns, use first non-empty row as header
+                    if any('Unnamed' in str(col) for col in import_df.columns) or len([c for c in import_df.columns if str(c).strip()]) == 0:
+                        # Find first row with actual data/headers
+                        for idx in range(min(5, len(temp_df))):
+                            row_values = [str(val).strip() if pd.notna(val) else '' for val in temp_df.iloc[idx].values]
+                            if any(val for val in row_values):  # If row has any non-empty values
+                                import_df = pd.read_excel(uploaded_file, header=idx)
+                                break
+                
+                # Normalize column names (strip whitespace and make case-insensitive mapping)
+                column_mapping = {}
+                for col in import_df.columns:
+                    normalized = str(col).strip()
+                    # Skip unnamed columns and empty columns
+                    if normalized and not normalized.startswith('Unnamed') and normalized != '':
+                        column_mapping[normalized.lower()] = col
+                
+                # Check only critical required columns (case-insensitive)
+                critical_required_columns = ['name']
+                missing_critical = []
+                found_columns = {}
+                
+                for req_col in critical_required_columns:
+                    if req_col.lower() in column_mapping:
+                        found_columns[req_col] = column_mapping[req_col.lower()]
+                    else:
+                        missing_critical.append(req_col)
+                
+                if missing_critical:
+                    st.error(f"❌ Missing critical required column: {', '.join([c.capitalize() for c in missing_critical])}")
+                    st.info("At minimum, 'Name' column is required. Other missing columns will be filled with empty values.")
+                    st.info(f"📋 Found columns in your file: {', '.join([str(c) for c in import_df.columns[:10]])}")
+                else:
+                    # Rename columns to standard format (case-insensitive)
+                    rename_dict = {}
+                    for std_col in ['Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                                   'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments']:
+                        std_col_lower = std_col.lower()
+                        if std_col_lower in column_mapping:
+                            original_col = column_mapping[std_col_lower]
+                            if original_col != std_col:
+                                rename_dict[original_col] = std_col
+                    
+                    if rename_dict:
+                        import_df = import_df.rename(columns=rename_dict)
+                    # Add missing columns with empty values
+                    template_columns = [
+                        'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                        'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+                    ]
+                    
+                    missing_columns = [col for col in template_columns if col not in import_df.columns]
+                    if missing_columns:
+                        for col in missing_columns:
+                            import_df[col] = ''
+                    
+                    # Ensure datetime columns are properly formatted
+                    if 'Date' in import_df.columns:
+                        import_df['Date'] = pd.to_datetime(import_df['Date'], errors='coerce')
+                    
+                    # Show preview
+                    st.markdown("**📋 Preview of Uploaded Data:**")
+                    st.dataframe(import_df.head(10), use_container_width=True, hide_index=True)
+                    st.caption(f"Total rows to import: {len(import_df)}")
+                    
+                    # Proceed with import
+                    if st.button("✅ Import Data", type="primary", use_container_width=True, key="import_podcast_btn"):
+                        try:
+                            # Ensure all template columns exist
+                            template_columns = [
+                                'Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                                'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments'
+                            ]
+                            for col in template_columns:
+                                if col not in import_df.columns:
+                                    import_df[col] = ''
+                            
+                            # Fill NaN values with empty strings for text columns
+                            text_columns = ['Podcast ID', 'Name', 'Designation', 'Organization', 'LinkedIn URL',
+                                          'Host', 'Day', 'Time', 'Status', 'Contacted Through', 'Comments']
+                            for col in text_columns:
+                                if col in import_df.columns:
+                                    import_df[col] = import_df[col].fillna('').astype(str)
+                            
+                            # Handle Status - normalize to valid values
+                            if 'Status' not in import_df.columns:
+                                import_df['Status'] = 'Upcoming'
+                            else:
+                                import_df['Status'] = import_df['Status'].apply(normalize_podcast_status)
+                            
+                            # Get current dataframe
+                            current_df = st.session_state.podcast_meetings_df.copy()
+                            
+                            # Clean up Podcast ID column
+                            if 'Podcast ID' in import_df.columns:
+                                import_df['Podcast ID'] = import_df['Podcast ID'].replace('', pd.NA)
+                                import_df['Podcast ID'] = import_df['Podcast ID'].replace(' ', pd.NA)
+                            
+                            if current_df.empty:
+                                # If no existing data, just add all
+                                if 'Podcast ID' not in import_df.columns or import_df['Podcast ID'].isna().all():
+                                    import_df['Podcast ID'] = range(1, len(import_df) + 1)
+                                else:
+                                    missing_mask = import_df['Podcast ID'].isna()
+                                    if missing_mask.any():
+                                        max_id = pd.to_numeric(import_df['Podcast ID'], errors='coerce').max()
+                                        if pd.isna(max_id):
+                                            max_id = 0
+                                        next_id = int(max_id) + 1
+                                        import_df.loc[missing_mask, 'Podcast ID'] = range(next_id, next_id + missing_mask.sum())
+                                st.session_state.podcast_meetings_df = import_df.copy()
+                                added_count = len(import_df)
+                                updated_count = 0
+                            else:
+                                # Handle Podcast ID
+                                if 'Podcast ID' not in import_df.columns or import_df['Podcast ID'].isna().all():
+                                    if 'Podcast ID' in current_df.columns:
+                                        max_id = pd.to_numeric(current_df['Podcast ID'], errors='coerce').max()
+                                        if pd.isna(max_id):
+                                            max_id = 0
+                                    else:
+                                        max_id = 0
+                                    import_df['Podcast ID'] = range(int(max_id) + 1, int(max_id) + 1 + len(import_df))
+                                else:
+                                    missing_mask = import_df['Podcast ID'].isna()
+                                    if missing_mask.any():
+                                        max_current = pd.to_numeric(current_df['Podcast ID'], errors='coerce').max() if 'Podcast ID' in current_df.columns else 0
+                                        max_import = pd.to_numeric(import_df['Podcast ID'], errors='coerce').max()
+                                        max_id = max(max_current if not pd.isna(max_current) else 0, max_import if not pd.isna(max_import) else 0)
+                                        next_id = int(max_id) + 1
+                                        import_df.loc[missing_mask, 'Podcast ID'] = range(next_id, next_id + missing_mask.sum())
+                                
+                                import_df['Podcast ID'] = pd.to_numeric(import_df['Podcast ID'], errors='coerce')
+                                if 'Podcast ID' in current_df.columns:
+                                    current_df['Podcast ID'] = pd.to_numeric(current_df['Podcast ID'], errors='coerce')
+                                
+                                added_count = 0
+                                updated_count = 0
+                                
+                                # Update & Add New mode
+                                if 'Podcast ID' in current_df.columns and 'Podcast ID' in import_df.columns:
+                                    existing_ids = set(pd.to_numeric(current_df['Podcast ID'], errors='coerce').dropna().astype(int))
+                                    import_df_ids = pd.to_numeric(import_df['Podcast ID'], errors='coerce')
+                                    mask_update = import_df_ids.isin(existing_ids) & import_df_ids.notna()
+                                    mask_add = ~mask_update
+                                    to_update = import_df[mask_update].copy()
+                                    to_add = import_df[mask_add].copy()
+                                else:
+                                    to_update = pd.DataFrame()
+                                    to_add = import_df.copy()
+                                
+                                # Update existing
+                                if not to_update.empty:
+                                    for _, row in to_update.iterrows():
+                                        podcast_id = pd.to_numeric(row.get('Podcast ID'), errors='coerce')
+                                        if pd.notna(podcast_id) and 'Podcast ID' in current_df.columns:
+                                            idx = current_df[pd.to_numeric(current_df['Podcast ID'], errors='coerce') == podcast_id].index[0]
+                                            for col in current_df.columns:
+                                                if col in row:
+                                                    current_df.at[idx, col] = row[col]
+                                    updated_count = len(to_update)
+                                
+                                # Add new
+                                if not to_add.empty:
+                                    current_df = pd.concat([current_df, to_add], ignore_index=True)
+                                    added_count = len(to_add)
+                                
+                                st.session_state.podcast_meetings_df = current_df
+                            
+                            # Save to database and Excel
+                            if save_podcast_meetings(st.session_state.podcast_meetings_df):
+                                success_msg = "✅ Import completed successfully!"
+                                if added_count > 0:
+                                    success_msg += f" Added {added_count} new podcast meeting(s)."
+                                if updated_count > 0:
+                                    success_msg += f" Updated {updated_count} existing podcast meeting(s)."
+                                st.success(success_msg)
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("Failed to save imported data.")
+                        
+                        except Exception as e:
+                            st.error(f"Error during import: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+            
+            except Exception as e:
+                st.error(f"Error reading file: {str(e)}")
+                st.info("Please ensure the file is a valid Excel file (.xlsx or .xls format)")
+        
+        st.markdown("### 📊 Summary Statistics")
+        col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+        with col_stat1:
+            st.metric("Total Podcast Meetings", len(st.session_state.podcast_meetings_df))
+        with col_stat2:
+            upcoming_count = len(st.session_state.podcast_meetings_df[st.session_state.podcast_meetings_df['Status'] == 'Upcoming'])
+            st.metric("Upcoming", upcoming_count)
+        with col_stat3:
+            completed_count = len(st.session_state.podcast_meetings_df[st.session_state.podcast_meetings_df['Status'] == 'Completed'])
+            st.metric("Completed", completed_count)
+        with col_stat4:
+            cancelled_count = len(st.session_state.podcast_meetings_df[st.session_state.podcast_meetings_df['Status'] == 'Cancelled'])
+            st.metric("Cancelled", cancelled_count)
+        
+        st.markdown("### 📋 Podcast Meetings List")
+        
+        if not filtered_meetings.empty:
+            available_columns = ['Podcast ID', 'Name', 'Designation', 'Organization', 'Host', 'Date', 'Day', 'Time', 'Status', 'Contacted Through']
+            display_columns = [col for col in available_columns if col in filtered_meetings.columns]
+            display_df = filtered_meetings[display_columns].copy()
+            
+            if 'Date' in display_df.columns:
+                display_df['Date'] = display_df['Date'].apply(lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if pd.notna(x) else 'N/A')
+            
+            # Multi-select and delete section
+            col_select1, col_select2 = st.columns([3, 1])
+            with col_select1:
+                select_all = st.checkbox("Select All", key="select_all_podcast_meetings", help="Select/deselect all podcast meetings")
+                if select_all:
+                    # Select all podcast IDs
+                    if 'Podcast ID' in filtered_meetings.columns:
+                        st.session_state.selected_podcast_meetings = set(
+                            int(podcast_id) for podcast_id in filtered_meetings['Podcast ID'].dropna() 
+                            if pd.notna(podcast_id)
+                        )
+                else:
+                    # Clear selection if "Select All" is unchecked
+                    if 'Podcast ID' in filtered_meetings.columns:
+                        filtered_ids = set(
+                            int(podcast_id) for podcast_id in filtered_meetings['Podcast ID'].dropna() 
+                            if pd.notna(podcast_id)
+                        )
+                        # Only clear if all filtered podcast meetings were selected
+                        if st.session_state.selected_podcast_meetings == filtered_ids:
+                            st.session_state.selected_podcast_meetings = set()
+            
+            with col_select2:
+                if st.session_state.selected_podcast_meetings:
+                    if st.button("🗑️ Delete Selected", type="primary", use_container_width=True, 
+                               help=f"Delete {len(st.session_state.selected_podcast_meetings)} selected podcast meeting(s)", key="bulk_delete_podcast"):
+                        # Delete selected podcast meetings
+                        deleted_count = 0
+                        failed_count = 0
+                        ids_to_delete = list(st.session_state.selected_podcast_meetings.copy())
+                        
+                        for podcast_id_int in ids_to_delete:
+                            try:
+                                delete_success = True
+                                if get_use_supabase() and init_db_pool():
+                                    delete_success = delete_podcast_meeting_from_supabase(podcast_id_int)
+                                if delete_success:
+                                    if 'Podcast ID' in st.session_state.podcast_meetings_df.columns:
+                                        st.session_state.podcast_meetings_df = st.session_state.podcast_meetings_df[
+                                            st.session_state.podcast_meetings_df['Podcast ID'] != podcast_id_int
+                                        ]
+                                    st.session_state.selected_podcast_meetings.discard(podcast_id_int)
+                                    deleted_count += 1
+                                else:
+                                    failed_count += 1
+                            except Exception as e:
+                                failed_count += 1
+                                st.session_state.selected_podcast_meetings.discard(podcast_id_int)
+                        
+                        if deleted_count > 0:
+                            save_podcast_meetings(st.session_state.podcast_meetings_df)
+                            if failed_count == 0:
+                                st.success(f"{deleted_count} Podcast Meeting(s) Deleted Successfully")
+                            else:
+                                st.warning(f"{deleted_count} Podcast Meeting(s) Deleted Successfully, {failed_count} Failed")
+                            st.rerun()
+                        elif failed_count > 0:
+                            st.error(f"Failed to delete {failed_count} podcast meeting(s)")
+            
+            num_data_cols = len(display_columns)
+            col_widths = [1] + [3] * num_data_cols + [1, 1]
+            
+            header_cols = st.columns(col_widths)
+            header_cols[0].markdown("<div style='line-height: 1.4; white-space: nowrap;'><small><strong>Select</strong></small></div>", unsafe_allow_html=True)
+            for idx, col_name in enumerate(display_columns):
+                header_cols[idx + 1].markdown(f"<div style='line-height: 1.4; word-wrap: break-word; white-space: normal; overflow: hidden;'><small><strong title='{col_name}'>{col_name}</strong></small></div>", unsafe_allow_html=True)
+            header_cols[-2].markdown("<div style='line-height: 1.4; white-space: nowrap;'><small><strong>Edit</strong></small></div>", unsafe_allow_html=True)
+            header_cols[-1].markdown("<div style='line-height: 1.4; white-space: nowrap;'><small><strong>Delete</strong></small></div>", unsafe_allow_html=True)
+            
+            st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
+            
+            for pos, (idx, row) in enumerate(display_df.iterrows()):
+                row_cols = st.columns(col_widths)
+                podcast_id = None
+                if 'Podcast ID' in filtered_meetings.columns and pos < len(filtered_meetings):
+                    podcast_id = filtered_meetings.iloc[pos].get('Podcast ID')
+                
+                if podcast_id is not None and pd.notna(podcast_id):
+                    podcast_id_int = int(podcast_id)
+                    is_selected = podcast_id_int in st.session_state.selected_podcast_meetings
+                    checkbox_key = f"select_podcast_checkbox_{podcast_id_int}_{idx}"
+                    checkbox_state = row_cols[0].checkbox("", value=is_selected, key=checkbox_key, label_visibility="collapsed", help="Select podcast meeting")
+                    if checkbox_state:
+                        st.session_state.selected_podcast_meetings.add(podcast_id_int)
+                    else:
+                        st.session_state.selected_podcast_meetings.discard(podcast_id_int)
+                
+                for col_idx, col_name in enumerate(display_columns):
+                    value = row.get(col_name, '')
+                    if pd.isna(value):
+                        value = ''
+                    value_str = str(value) if value else ''
+                    if len(value_str) > 50 and col_name in ['Name', 'Organization']:
+                        value_str = value_str[:47] + "..."
+                    row_cols[col_idx + 1].markdown(f"<div style='line-height: 1.5; word-wrap: break-word; overflow-wrap: break-word; white-space: normal;'><small>{value_str}</small></div>", unsafe_allow_html=True)
+                
+                if podcast_id is not None and pd.notna(podcast_id):
+                    if row_cols[-2].button("✏️", key=f"edit_podcast_{podcast_id}_{idx}", use_container_width=False, help="Edit podcast meeting"):
+                        st.session_state.current_page = "Edit/Update Podcast Meeting"
+                        st.session_state.edit_podcast_meeting_id = int(podcast_id)
+                        st.rerun()
+                
+                if podcast_id is not None and pd.notna(podcast_id):
+                    if row_cols[-1].button("🗑️", key=f"delete_podcast_{podcast_id}_{idx}", use_container_width=False, type="secondary", help="Delete podcast meeting"):
+                        try:
+                            podcast_id_int = int(podcast_id)
+                            delete_success = True
+                            if get_use_supabase() and init_db_pool():
+                                delete_success = delete_podcast_meeting_from_supabase(podcast_id_int)
+                            if delete_success:
+                                if 'Podcast ID' in st.session_state.podcast_meetings_df.columns:
+                                    st.session_state.podcast_meetings_df = st.session_state.podcast_meetings_df[
+                                        st.session_state.podcast_meetings_df['Podcast ID'] != podcast_id_int
+                                    ]
+                                save_podcast_meetings(st.session_state.podcast_meetings_df)
+                                st.success("✅ Podcast Meeting Deleted Successfully")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Failed to delete podcast meeting {podcast_id_int} from database. Please try again.")
+                        except Exception as e:
+                            st.error(f"Error deleting podcast meeting: {e}")
+                
+                st.markdown("<hr style='margin: 0.3rem 0;'>", unsafe_allow_html=True)
+            
+            st.caption(f"Showing {len(display_df)} podcast meeting(s)")
+        else:
+            st.info("📭 No podcast meetings found matching your filters.")
+        
+        st.markdown("---")
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+                    padding: 1.5rem;
+                    border-radius: 12px;
+                    margin-bottom: 1.5rem;
+                    border-left: 4px solid #06b6d4;
+                    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);">
+            <h2 style="margin: 0; color: #1e293b; font-size: 1.5rem; font-weight: 600;">📥 Export Data</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if not st.session_state.podcast_meetings_df.empty:
+            if st.button("📥 Export to Excel", type="primary", use_container_width=True, key="export_podcast"):
+                export_filename = f"podcast_meetings_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                try:
+                    st.session_state.podcast_meetings_df.to_excel(export_filename, index=False)
+                    st.success(f"✅ Data exported to {export_filename}")
+                    with open(export_filename, "rb") as file:
+                        st.download_button(
+                            label="⬇️ Download Exported File",
+                            data=file,
+                            file_name=export_filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                except Exception as e:
+                    st.error(f"Error exporting data: {e}")
+        else:
+            st.info("📭 No data available to export. Add podcast meetings first.")
 
