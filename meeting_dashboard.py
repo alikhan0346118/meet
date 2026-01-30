@@ -1717,9 +1717,9 @@ st.sidebar.markdown("<h3 style='font-size: 1rem; color: #475569; margin-bottom: 
 
 # All pages in a single radio group for single selection
 all_pages = [
+    "📊 Smart Meeting Summary",
     "➕ Add New Meeting", 
     "✏️ Edit/Update Meeting", 
-    "📊 Meetings Summary & Export",
     "➕ Add New Podcast Meeting", 
     "✏️ Edit/Update Podcast Meeting", 
     "📊 Podcast Meetings Summary & Export"
