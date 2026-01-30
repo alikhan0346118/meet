@@ -145,7 +145,7 @@ def load_meetings_from_supabase():
                         time_zone as "Time Zone",
                         meeting_type as "Meeting Type",
                         meeting_link as "Meeting Link",
-                        location as "Location",
+                        location as "Website",
                         status as "Status",
                         priority as "Priority",
                         attendees as "Attendees",
@@ -178,7 +178,7 @@ def load_meetings_from_supabase():
                     return pd.DataFrame(columns=[
                         'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                         'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                        'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                        'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                         'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                         'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
                     ])
@@ -198,11 +198,14 @@ def load_meetings():
     if os.path.exists(EXCEL_FILE):
         try:
             df = pd.read_excel(EXCEL_FILE)
+            # Backwards compatibility: rename Location to Website if present
+            if 'Location' in df.columns and 'Website' not in df.columns:
+                df = df.rename(columns={'Location': 'Website'})
             # Ensure all template columns exist
             template_columns = [
                 'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                 'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                 'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                 'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
             ]
@@ -222,7 +225,7 @@ def load_meetings():
             return pd.DataFrame(columns=[
                 'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                 'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                 'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                 'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
             ])
@@ -230,7 +233,7 @@ def load_meetings():
         return pd.DataFrame(columns=[
             'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
             'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+            'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
             'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
             'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
         ])
@@ -415,7 +418,7 @@ def save_meeting_to_supabase(row):
                         row.get('Time Zone') if pd.notna(row.get('Time Zone')) else 'UTC',
                         normalize_meeting_type(row.get('Meeting Type')),
                         row.get('Meeting Link') if pd.notna(row.get('Meeting Link')) else None,
-                        row.get('Location') if pd.notna(row.get('Location')) else None,
+                        row.get('Website') if pd.notna(row.get('Website')) else None,
                         normalize_status(row.get('Status')),
                         row.get('Priority') if pd.notna(row.get('Priority')) else 'Medium',
                         row.get('Attendees') if pd.notna(row.get('Attendees')) else None,
@@ -454,7 +457,7 @@ def save_meeting_to_supabase(row):
                         row.get('Time Zone') if pd.notna(row.get('Time Zone')) else 'UTC',
                         normalize_meeting_type(row.get('Meeting Type')),
                         row.get('Meeting Link') if pd.notna(row.get('Meeting Link')) else None,
-                        row.get('Location') if pd.notna(row.get('Location')) else None,
+                        row.get('Website') if pd.notna(row.get('Website')) else None,
                         normalize_status(row.get('Status')),
                         row.get('Priority') if pd.notna(row.get('Priority')) else 'Medium',
                         row.get('Attendees') if pd.notna(row.get('Attendees')) else None,
@@ -532,7 +535,7 @@ def save_meetings(df):
             template_columns = [
                 'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                 'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                 'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                 'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
             ]
@@ -745,11 +748,13 @@ def load_data():
                 if os.path.exists(EXCEL_FILE):
                     try:
                         excel_df = pd.read_excel(EXCEL_FILE)
+                        if 'Location' in excel_df.columns and 'Website' not in excel_df.columns:
+                            excel_df = excel_df.rename(columns={'Location': 'Website'})
                         # Ensure all template columns exist
                         template_columns = [
                             'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                             'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                            'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                             'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                             'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
                         ]
@@ -771,7 +776,7 @@ def load_data():
                     st.session_state.meetings_df = pd.DataFrame(columns=[
                         'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                         'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                        'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                        'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                         'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                         'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
                     ])
@@ -1857,12 +1862,6 @@ if st.session_state.current_page == "Add New Meeting":
         col1, col2 = st.columns(2)
         
         with col1:
-            meeting_title = st.text_input(
-                "Meeting Title *", 
-                value="",
-                placeholder="Enter the meeting title",
-                help="Enter the title of the meeting"
-            )
             organization = st.text_input(
                 "Organization",
                 value="",
@@ -1904,8 +1903,8 @@ if st.session_state.current_page == "Add New Meeting":
         with col_date3:
             time_zone = st.text_input("Time Zone", value="UTC", placeholder="e.g., UTC, EST, PST")
         
-        # Location and Links
-        st.markdown("### 📍 Location & Links")
+        # Website and Links
+        st.markdown("### 📍 Website & Links")
         col_loc1, col_loc2 = st.columns(2)
         
         with col_loc1:
@@ -1916,11 +1915,11 @@ if st.session_state.current_page == "Add New Meeting":
                 help="Enter the meeting link for virtual meetings"
             )
         with col_loc2:
-            location = st.text_input(
-                "Location",
+            website = st.text_input(
+                "Website",
                 value="",
-                placeholder="Enter physical location (for in-person meetings)",
-                help="Enter the physical location for in-person meetings"
+                placeholder="Enter website URL",
+                help="Enter the website URL"
             )
         
         # Attendees
@@ -1987,9 +1986,6 @@ if st.session_state.current_page == "Add New Meeting":
         if submitted:
             # Validation
             errors = []
-            if not meeting_title.strip():
-                errors.append("Meeting Title is required")
-            
             if not stakeholder_name.strip():
                 errors.append("Stakeholder Name is required")
             
@@ -2006,7 +2002,7 @@ if st.session_state.current_page == "Add New Meeting":
                 # Create new meeting
                 new_meeting = pd.DataFrame([{
                     'Meeting ID': get_next_meeting_id(st.session_state.meetings_df),
-                    'Meeting Title': meeting_title.strip(),
+                    'Meeting Title': '',
                     'Organization': organization.strip(),
                     'Client': client.strip(),
                     'Stakeholder Name': stakeholder_name.strip(),
@@ -2017,7 +2013,7 @@ if st.session_state.current_page == "Add New Meeting":
                     'Time Zone': time_zone.strip(),
                     'Meeting Type': meeting_type,
                     'Meeting Link': meeting_link.strip(),
-                    'Location': location.strip(),
+                    'Website': website.strip(),
                     'Status': status,
                     'Priority': priority,
                     'Attendees': attendees.strip(),
@@ -2061,7 +2057,8 @@ elif st.session_state.current_page == "Edit/Update Meeting":
         meeting_options = {}
         meeting_index_map = {}  # Map label to DataFrame index
         for idx, row in st.session_state.meetings_df.iterrows():
-            meeting_title = str(row.get('Meeting Title', 'N/A'))
+            org = str(row.get('Organization', 'N/A'))
+            stakeholder = str(row.get('Stakeholder Name', 'N/A'))
             meeting_date = row.get('Meeting Date', '')
             if pd.notna(meeting_date):
                 try:
@@ -2070,7 +2067,7 @@ elif st.session_state.current_page == "Edit/Update Meeting":
                     date_str = str(meeting_date)
             else:
                 date_str = 'N/A'
-            label = f"{meeting_title} - {date_str}"
+            label = f"{org} - {stakeholder} - {date_str}"
             meeting_id = row.get('Meeting ID', idx)
             meeting_options[label] = meeting_id
             meeting_index_map[label] = idx  # Store the actual DataFrame index
@@ -2126,7 +2123,6 @@ elif st.session_state.current_page == "Edit/Update Meeting":
         with st.expander("📋 View Current Meeting Details", expanded=False):
             col1, col2 = st.columns(2)
             with col1:
-                st.write(f"**Meeting Title:** {selected_meeting.get('Meeting Title', 'N/A')}")
                 st.write(f"**Status:** {selected_meeting.get('Status', 'N/A')}")
                 st.write(f"**Type:** {selected_meeting.get('Meeting Type', 'N/A')}")
                 st.write(f"**Organization:** {selected_meeting.get('Organization', 'N/A')}")
@@ -2147,8 +2143,8 @@ elif st.session_state.current_page == "Edit/Update Meeting":
                 st.write(f"**Time Zone:** {selected_meeting.get('Time Zone', 'N/A')}")
                 if selected_meeting.get('Meeting Link'):
                     st.write(f"**Meeting Link:** {selected_meeting.get('Meeting Link', 'N/A')}")
-                if selected_meeting.get('Location'):
-                    st.write(f"**Location:** {selected_meeting.get('Location', 'N/A')}")
+                if selected_meeting.get('Website'):
+                    st.write(f"**Website:** {selected_meeting.get('Website', 'N/A')}")
                 if selected_meeting.get('Attendees'):
                     st.write(f"**Attendees:** {selected_meeting.get('Attendees', 'N/A')}")
         
@@ -2160,12 +2156,6 @@ elif st.session_state.current_page == "Edit/Update Meeting":
             col1, col2 = st.columns(2)
             
             with col1:
-                edit_meeting_title = st.text_input(
-                    "Meeting Title *", 
-                    value=str(selected_meeting.get('Meeting Title', '')),
-                    placeholder="Enter the meeting title",
-                    help="Enter the title of the meeting"
-                )
                 edit_organization = st.text_input(
                     "Organization",
                     value=str(selected_meeting.get('Organization', '')),
@@ -2227,14 +2217,14 @@ elif st.session_state.current_page == "Edit/Update Meeting":
             with col_date3:
                 edit_time_zone = st.text_input("Time Zone", value=str(selected_meeting.get('Time Zone', 'UTC')))
             
-            # Location and Links
-            st.markdown("### 📍 Location & Links")
+            # Website and Links
+            st.markdown("### 📍 Website & Links")
             col_loc1, col_loc2 = st.columns(2)
             
             with col_loc1:
                 edit_meeting_link = st.text_input("Meeting Link", value=str(selected_meeting.get('Meeting Link', '')))
             with col_loc2:
-                edit_location = st.text_input("Location", value=str(selected_meeting.get('Location', '')))
+                edit_website = st.text_input("Website", value=str(selected_meeting.get('Website', '')), placeholder="Enter website URL")
             
             # Attendees
             st.markdown("### 👥 Attendees")
@@ -2321,7 +2311,6 @@ elif st.session_state.current_page == "Edit/Update Meeting":
                         st.stop()
                     
                     # Update meeting - automatically set missing required fields to empty string (null)
-                    st.session_state.meetings_df.at[idx, 'Meeting Title'] = edit_meeting_title.strip() if edit_meeting_title.strip() else ''
                     st.session_state.meetings_df.at[idx, 'Organization'] = edit_organization.strip() if edit_organization else ''
                     st.session_state.meetings_df.at[idx, 'Client'] = edit_client.strip() if edit_client else ''
                     st.session_state.meetings_df.at[idx, 'Stakeholder Name'] = edit_stakeholder_name.strip() if edit_stakeholder_name.strip() else ''
@@ -2332,7 +2321,7 @@ elif st.session_state.current_page == "Edit/Update Meeting":
                     st.session_state.meetings_df.at[idx, 'Time Zone'] = edit_time_zone.strip() if edit_time_zone else ''
                     st.session_state.meetings_df.at[idx, 'Meeting Type'] = edit_meeting_type if edit_meeting_type else ''
                     st.session_state.meetings_df.at[idx, 'Meeting Link'] = edit_meeting_link.strip() if edit_meeting_link else ''
-                    st.session_state.meetings_df.at[idx, 'Location'] = edit_location.strip() if edit_location else ''
+                    st.session_state.meetings_df.at[idx, 'Website'] = edit_website.strip() if edit_website else ''
                     st.session_state.meetings_df.at[idx, 'Status'] = edit_status if edit_status else ''
                     st.session_state.meetings_df.at[idx, 'Priority'] = edit_priority if edit_priority else ''
                     st.session_state.meetings_df.at[idx, 'Attendees'] = edit_attendees.strip() if edit_attendees.strip() else ''
@@ -2428,7 +2417,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
         template_columns = [
             'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
             'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+            'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
             'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
             'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
         ]
@@ -2447,7 +2436,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
             'Time Zone': 'UTC',
             'Meeting Type': 'Virtual',
             'Meeting Link': 'https://meet.example.com',
-            'Location': '',
+            'Website': '',
             'Status': 'Upcoming',
             'Priority': 'Medium',
             'Attendees': 'Team Member 1, Team Member 2',
@@ -2478,7 +2467,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
     uploaded_file = st.file_uploader(
         "Choose an Excel file to import",
         type=['xlsx', 'xls'],
-        help="Upload an Excel file with meeting data. Required columns: Meeting Title. All other columns are optional."
+        help="Upload an Excel file with meeting data. Required columns: Organization. All other columns are optional."
     )
     
     if uploaded_file is not None:
@@ -2490,11 +2479,11 @@ elif st.session_state.current_page == "Meetings Summary & Export":
             if any('Unnamed' in str(col) for col in import_df.columns) or (len(import_df.columns) > 0 and str(import_df.columns[0]).startswith('Unnamed')):
                 # Try reading without header first to see the data
                 temp_df = pd.read_excel(uploaded_file, header=None)
-                # Look for a row that contains "Meeting Title" or "meeting title" (case-insensitive)
+                # Look for a row that contains "Organization" or "Meeting Title" (case-insensitive)
                 header_row = None
                 for idx in range(min(5, len(temp_df))):  # Check first 5 rows
                     row_values = [str(val).strip().lower() for val in temp_df.iloc[idx].values if pd.notna(val)]
-                    if any('meeting title' in str(val).lower() or 'title' in str(val).lower() for val in row_values):
+                    if any('organization' in str(val).lower() or 'meeting title' in str(val).lower() or 'title' in str(val).lower() for val in row_values):
                         header_row = idx
                         break
                 
@@ -2521,7 +2510,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                     column_mapping[normalized.lower()] = col
             
             # Check only critical required columns (case-insensitive)
-            critical_required_columns = ['meeting title']
+            critical_required_columns = ['organization']
             missing_critical = []
             found_columns = {}
             
@@ -2533,14 +2522,14 @@ elif st.session_state.current_page == "Meetings Summary & Export":
             
             if missing_critical:
                 st.error(f"❌ Missing critical required column: {', '.join([c.title() for c in missing_critical])}")
-                st.info("At minimum, 'Meeting Title' column is required. Other missing columns will be filled with empty values.")
+                st.info("At minimum, 'Organization' column is required. Other missing columns will be filled with empty values.")
                 st.info(f"📋 Found columns in your file: {', '.join([str(c) for c in import_df.columns[:10]])}")
             else:
                 # Rename columns to standard format (case-insensitive)
                 rename_dict = {}
                 for std_col in ['Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                                'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                               'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                               'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                                'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                                'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title']:
                     std_col_lower = std_col.lower()
@@ -2548,6 +2537,9 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                         original_col = column_mapping[std_col_lower]
                         if original_col != std_col:
                             rename_dict[original_col] = std_col
+                # Backwards compatibility: map Location to Website
+                if 'location' in column_mapping and 'website' not in column_mapping:
+                    rename_dict[column_mapping['location']] = 'Website'
                 
                 if rename_dict:
                     import_df = import_df.rename(columns=rename_dict)
@@ -2555,7 +2547,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                 template_columns = [
                     'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                     'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                    'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                    'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                     'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                     'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
                 ]
@@ -2582,14 +2574,14 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                 
                 # Normalize empty values to null
                 for idx, row in import_df.iterrows():
-                    meeting_title = row.get('Meeting Title', '')
-                    has_meeting_title = (
-                        pd.notna(meeting_title) and 
-                        str(meeting_title).strip() != '' and 
-                        str(meeting_title).strip().lower() not in ['nan', 'none', 'null', '']
+                    organization = row.get('Organization', '')
+                    has_organization = (
+                        pd.notna(organization) and 
+                        str(organization).strip() != '' and 
+                        str(organization).strip().lower() not in ['nan', 'none', 'null', '']
                     )
                     
-                    if has_meeting_title:
+                    if has_organization:
                         meeting_date = row.get('Meeting Date', '')
                         is_date_empty = True
                         if pd.notna(meeting_date):
@@ -2637,7 +2629,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                         template_columns = [
                             'Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name',
                             'Purpose', 'Agenda', 'Meeting Date', 'Start Time', 'Time Zone',
-                            'Meeting Type', 'Meeting Link', 'Location', 'Status', 'Priority',
+                            'Meeting Type', 'Meeting Link', 'Website', 'Status', 'Priority',
                             'Attendees', 'Internal External Guests', 'Notes', 'Next Action',
                             'Follow up Date', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title'
                         ]
@@ -2648,7 +2640,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                         # Fill NaN values with empty strings for text columns
                         text_columns = ['Meeting ID', 'Meeting Title', 'Organization', 'Client', 'Stakeholder Name', 'Purpose', 
                                       'Agenda', 'Start Time', 'Time Zone', 'Meeting Type', 'Meeting Link', 
-                                      'Location', 'Status', 'Priority', 'Attendees', 'Internal External Guests', 'Notes', 
+                                      'Website', 'Status', 'Priority', 'Attendees', 'Internal External Guests', 'Notes', 
                                       'Next Action', 'Reminder Sent', 'Calendar Sync', 'Calendar Event Title']
                         for col in text_columns:
                             if col in import_df.columns:
@@ -2830,16 +2822,16 @@ elif st.session_state.current_page == "Meetings Summary & Export":
         if 'Follow up Date' in display_df.columns:
             display_df['Follow up Date'] = pd.to_datetime(display_df['Follow up Date'], errors='coerce').dt.strftime('%Y-%m-%d')
         
-        # Select columns to display (show most important ones)
-        display_columns = ['Meeting Title', 'Meeting Date', 'Start Time', 'Status', 
-                          'Meeting Type', 'Organization', 'Client', 'Stakeholder Name', 
-                          'Priority', 'Attendees', 'Location', 'Meeting Link']
+        # Select columns to display (show most important ones; Meeting Title removed)
+        display_columns = ['Organization', 'Meeting Date', 'Start Time', 'Status', 
+                          'Meeting Type', 'Client', 'Stakeholder Name', 
+                          'Priority', 'Attendees', 'Website', 'Meeting Link']
         available_columns = [col for col in display_columns if col in display_df.columns]
         
         # Define column widths based on content importance and typical size
         # Increased widths to prevent text stacking
         column_width_map = {
-            'Meeting Title': 2.5,      # Wider - important and can be long
+            'Organization': 1.8,      # Wider - important and can be long
             'Meeting Date': 1.0,       # Medium - dates are standard width
             'Start Time': 0.8,         # Narrow - time format is short
             'Status': 0.9,             # Medium - status values are short
@@ -2849,7 +2841,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
             'Stakeholder Name': 2.0,   # Wider - names can be long
             'Priority': 0.7,           # Narrow - "High", "Medium", "Low"
             'Attendees': 1.2,          # Medium - can be empty or long
-            'Location': 1.2,           # Medium - can be empty or long
+            'Website': 1.2,           # Medium - can be empty or long
             'Meeting Link': 1.5        # Medium-wide - URLs can be long
         }
         
@@ -2925,6 +2917,21 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                     elif failed_count > 0:
                         st.error(f"Failed to delete {failed_count} meeting(s)")
         
+        # Scrollable table container: marker + CSS so the table body scrolls
+        st.markdown("<div id='meetings-table-scroll-marker'></div>", unsafe_allow_html=True)
+        st.markdown("""
+        <style>
+        div[data-testid="stVerticalBlock"]:has(#meetings-table-scroll-marker) {
+            max-height: 65vh !important;
+            overflow-y: auto !important;
+            overflow-x: auto !important;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        </style>
+        """, unsafe_allow_html=True)
         # Create a custom table with Edit and Delete buttons (optimized column widths)
         header_cols = st.columns(col_widths)
         
@@ -2973,7 +2980,7 @@ elif st.session_state.current_page == "Meetings Summary & Export":
                     value = ''
                 # Truncate very long values to prevent excessive wrapping
                 value_str = str(value) if value else ''
-                if len(value_str) > 50 and col_name in ['Meeting Title', 'Organization', 'Stakeholder Name']:
+                if len(value_str) > 50 and col_name in ['Organization', 'Stakeholder Name']:
                     value_str = value_str[:47] + "..."
                 row_cols[col_idx + 1].markdown(
                     f"<div style='line-height: 1.5; word-wrap: break-word; overflow-wrap: break-word; white-space: normal;'><small>{value_str}</small></div>", 
@@ -3644,6 +3651,22 @@ elif st.session_state.current_page == "Podcast Meetings Summary & Export":
             
             num_data_cols = len(display_columns)
             col_widths = [1] + [3] * num_data_cols + [1, 1]
+            
+            # Scrollable podcast table container
+            st.markdown("<div id='podcast-table-scroll-marker'></div>", unsafe_allow_html=True)
+            st.markdown("""
+            <style>
+            div[data-testid="stVerticalBlock"]:has(#podcast-table-scroll-marker) {
+                max-height: 65vh !important;
+                overflow-y: auto !important;
+                overflow-x: auto !important;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 0.5rem;
+                margin-bottom: 0.5rem;
+            }
+            </style>
+            """, unsafe_allow_html=True)
             
             header_cols = st.columns(col_widths)
             header_cols[0].markdown("<div style='line-height: 1.4; white-space: nowrap;'><small><strong>Select</strong></small></div>", unsafe_allow_html=True)
