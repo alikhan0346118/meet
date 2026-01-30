@@ -49,7 +49,7 @@ if 'meetings_df' not in st.session_state:
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'current_page' not in st.session_state:
-    st.session_state.current_page = "Add New Meeting"  # Default to Add New Meeting
+    st.session_state.current_page = "Meetings Summary & Export"  # Default to Smart Meeting Summary
 if 'selected_meetings' not in st.session_state:
     st.session_state.selected_meetings = set()
 if 'db_pool' not in st.session_state:
@@ -1715,29 +1715,29 @@ st.sidebar.markdown("""
 # Page selection with enhanced styling
 st.sidebar.markdown("<h3 style='font-size: 1rem; color: #475569; margin-bottom: 0.75rem; font-weight: 600;'>📑 Navigate to:</h3>", unsafe_allow_html=True)
 
-# All pages in a single radio group for single selection
+# All pages in a single radio group for single selection (Smart Meeting Summary at top)
 all_pages = [
     "📊 Smart Meeting Summary",
     "➕ Add New Meeting", 
     "✏️ Edit/Update Meeting", 
     "➕ Add New Podcast Meeting", 
     "✏️ Edit/Update Podcast Meeting", 
-    "📊 Podcast Smart Meeting Summary"
+    "📊 Podcast Meetings Summary & Export"
 ]
 
-# Calculate index based on current page (default to 0 = Add New Meeting)
+# Calculate index based on current page (default to 0 = Smart Meeting Summary)
 current_index = 0
-if st.session_state.current_page == "Add New Meeting":
+if st.session_state.current_page == "Meetings Summary & Export":
     current_index = 0
-elif st.session_state.current_page == "Edit/Update Meeting":
+elif st.session_state.current_page == "Add New Meeting":
     current_index = 1
-elif st.session_state.current_page == "Smart Meeting Summary":
+elif st.session_state.current_page == "Edit/Update Meeting":
     current_index = 2
 elif st.session_state.current_page == "Add New Podcast Meeting":
     current_index = 3
 elif st.session_state.current_page == "Edit/Update Podcast Meeting":
     current_index = 4
-elif st.session_state.current_page == "Podcast Smart Meeting Summary":
+elif st.session_state.current_page == "Podcast Meetings Summary & Export":
     current_index = 5
 
 page = st.sidebar.radio(
@@ -1748,28 +1748,26 @@ page = st.sidebar.radio(
 )
 
 # Update current page based on selection
-if "Add New Meeting" in page and "Podcast" not in page:
-    st.session_state.current_page = "Add New Meeting"
-elif "Edit/Update Meeting" in page and "Podcast" not in page:
-    st.session_state.current_page = "Edit/Update Meeting"
-elif "Meetings Summary" in page and "Podcast" not in page:
-    st.session_state.current_page = "Smart Meeting Summary"
-    # Refresh button below Meetings Summary & Export
+if "Smart Meeting Summary" in page:
+    st.session_state.current_page = "Meetings Summary & Export"
+    # Refresh button below Smart Meeting Summary
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Refresh", help="Reload data from database", use_container_width=True, key="refresh_btn"):
-        # Reset data loaded flag to force reload
         st.session_state.data_loaded = False
-        # Clear and reload data
         with st.spinner("Refreshing data..."):
             load_data()
             st.sidebar.success("✅ Data refreshed!")
             st.rerun()
+elif "Add New Meeting" in page and "Podcast" not in page:
+    st.session_state.current_page = "Add New Meeting"
+elif "Edit/Update Meeting" in page and "Podcast" not in page:
+    st.session_state.current_page = "Edit/Update Meeting"
 elif "Add New Podcast" in page:
     st.session_state.current_page = "Add New Podcast Meeting"
 elif "Edit/Update Podcast" in page:
     st.session_state.current_page = "Edit/Update Podcast Meeting"
 elif "Podcast Meetings Summary" in page:
-    st.session_state.current_page = "Podcast Smart Meeting Summary"
+    st.session_state.current_page = "Podcast Meetings Summary & Export"
     # Refresh button below Podcast Meetings Summary & Export
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Refresh", help="Reload podcast data from database", use_container_width=True, key="refresh_podcast_btn"):
@@ -1818,12 +1816,12 @@ else:
 
 # Enhanced Main Title with better visual hierarchy
 page_titles = {
+    "Meetings Summary & Export": "📊 Smart Meeting Summary",
     "Add New Meeting": "➕ Add New Meeting",
     "Edit/Update Meeting": "✏️ Edit/Update Meeting",
-    "Smart Meeting Summary": "📊 Smart Meeting Summary",
     "Add New Podcast Meeting": "➕ Add New Podcast Meeting",
     "Edit/Update Podcast Meeting": "✏️ Edit/Update Podcast Meeting",
-    "Podcast Smart Meeting Summary": "📊 Podcast Smart Meeting Summary"
+    "Podcast Meetings Summary & Export": "📊 Podcast Meetings Summary & Export"
 }
 page_icon = "➕" if "Add New" in st.session_state.current_page else ("✏️" if "Edit" in st.session_state.current_page else "📊")
 
@@ -1846,7 +1844,7 @@ st.markdown(f"""
         <span style="background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
                      -webkit-background-clip: text;
                      -webkit-text-fill-color: transparent;
-                     background-clip: text;">{st.session_state.current_page}</span>
+                     background-clip: text;">{page_titles.get(st.session_state.current_page, st.session_state.current_page)}</span>
     </h1>
     <p style="color: #64748b; margin: 0.5rem 0 0 0; font-size: 1rem;">AI Geo Navigators Meeting Management System</p>
 </div>
@@ -3656,10 +3654,10 @@ elif st.session_state.current_page == "Podcast Meetings Summary & Export":
             st.markdown("<div id='podcast-table-scroll-marker'></div>", unsafe_allow_html=True)
             st.markdown("""
             <style>
-            div[data-testid="stVerticalBlock"]:has(#podcast-table-scroll-marker) {
-                max-height: 65vh !important;
-                overflow-y: auto !important;
-                overflow-x: auto !important;
+            div:has(> #podcast-table-scroll-marker) {
+                max-height: 65vh;
+                overflow-y: auto;
+                overflow-x: auto;
                 border: 1px solid #e2e8f0;
                 border-radius: 8px;
                 padding: 0.5rem;
