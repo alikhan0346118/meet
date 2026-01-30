@@ -1722,7 +1722,7 @@ all_pages = [
     "✏️ Edit/Update Meeting", 
     "➕ Add New Podcast Meeting", 
     "✏️ Edit/Update Podcast Meeting", 
-    "📊 Podcast Meetings Summary & Export"
+    "📊 Podcast Smart Meeting Summary"
 ]
 
 # Calculate index based on current page (default to 0 = Add New Meeting)
@@ -1731,13 +1731,13 @@ if st.session_state.current_page == "Add New Meeting":
     current_index = 0
 elif st.session_state.current_page == "Edit/Update Meeting":
     current_index = 1
-elif st.session_state.current_page == "Meetings Summary & Export":
+elif st.session_state.current_page == "Smart Meeting Summary":
     current_index = 2
 elif st.session_state.current_page == "Add New Podcast Meeting":
     current_index = 3
 elif st.session_state.current_page == "Edit/Update Podcast Meeting":
     current_index = 4
-elif st.session_state.current_page == "Podcast Meetings Summary & Export":
+elif st.session_state.current_page == "Podcast Smart Meeting Summary":
     current_index = 5
 
 page = st.sidebar.radio(
@@ -1753,7 +1753,7 @@ if "Add New Meeting" in page and "Podcast" not in page:
 elif "Edit/Update Meeting" in page and "Podcast" not in page:
     st.session_state.current_page = "Edit/Update Meeting"
 elif "Meetings Summary" in page and "Podcast" not in page:
-    st.session_state.current_page = "Meetings Summary & Export"
+    st.session_state.current_page = "Smart Meeting Summary"
     # Refresh button below Meetings Summary & Export
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Refresh", help="Reload data from database", use_container_width=True, key="refresh_btn"):
@@ -1769,7 +1769,7 @@ elif "Add New Podcast" in page:
 elif "Edit/Update Podcast" in page:
     st.session_state.current_page = "Edit/Update Podcast Meeting"
 elif "Podcast Meetings Summary" in page:
-    st.session_state.current_page = "Podcast Meetings Summary & Export"
+    st.session_state.current_page = "Podcast Smart Meeting Summary"
     # Refresh button below Podcast Meetings Summary & Export
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Refresh", help="Reload podcast data from database", use_container_width=True, key="refresh_podcast_btn"):
@@ -1820,10 +1820,10 @@ else:
 page_titles = {
     "Add New Meeting": "➕ Add New Meeting",
     "Edit/Update Meeting": "✏️ Edit/Update Meeting",
-    "Meetings Summary & Export": "📊 Meetings Summary & Export",
+    "Smart Meeting Summary": "📊 Smart Meeting Summary",
     "Add New Podcast Meeting": "➕ Add New Podcast Meeting",
     "Edit/Update Podcast Meeting": "✏️ Edit/Update Podcast Meeting",
-    "Podcast Meetings Summary & Export": "📊 Podcast Meetings Summary & Export"
+    "Podcast Smart Meeting Summary": "📊 Podcast Smart Meeting Summary"
 }
 page_icon = "➕" if "Add New" in st.session_state.current_page else ("✏️" if "Edit" in st.session_state.current_page else "📊")
 
